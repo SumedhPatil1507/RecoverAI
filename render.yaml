@@ -1,0 +1,42 @@
+# Render.com – deploy both services from one repo
+# https://render.com/docs/blueprint-spec
+
+services:
+  # ── FastAPI API ──────────────────────────────────────────────────────────
+  - type: web
+    name: recoverai-api
+    runtime: python
+    plan: free                      # upgrade to starter for production
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn recover_ai.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false                 # Set manually in Render dashboard
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: DATABASE_PATH
+        value: /opt/render/project/src/recover_ai.db
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+    healthCheckPath: /health
+
+  # ── Streamlit Dashboard ──────────────────────────────────────────────────
+  - type: web
+    name: recoverai-dashboard
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: >
+      streamlit run streamlit_app.py
+      --server.port $PORT
+      --server.address 0.0.0.0
+      --server.headless true
+    envVars:
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: DATABASE_PATH
+        value: /opt/render/project/src/recover_ai.db
+      - key: PYTHON_VERSION
+        value: "3.11.0"

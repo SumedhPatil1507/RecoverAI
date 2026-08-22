@@ -1,0 +1,19 @@
+[theme]
+base            = "dark"
+primaryColor    = "#4285f4"
+backgroundColor = "#0d1b2a"
+secondaryBackgroundColor = "#0a1628"
+textColor       = "#c9d1d9"
+font            = "sans serif"
+
+[server]
+headless        = true          # Required for cloud deployments
+enableCORS      = false
+enableXsrfProtection = true
+maxUploadSize   = 10            # MB
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+fastReruns = true

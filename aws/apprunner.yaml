@@ -1,0 +1,27 @@
+# AWS App Runner configuration
+# Deploy via: aws apprunner create-service --cli-input-yaml file://aws/apprunner.yaml
+
+ServiceName: recoverai-api
+SourceConfiguration:
+  ImageRepository:
+    ImageIdentifier: YOUR_DOCKERHUB_USERNAME/recoverai:latest
+    ImageConfiguration:
+      Port: "8000"
+      RuntimeEnvironmentVariables:
+        DATABASE_PATH: "/app/data/recover_ai.db"
+        # Set RAZORPAY_WEBHOOK_SECRET and OPENAI_API_KEY via AWS Secrets Manager
+        # Reference them here or inject via the App Runner console
+    ImageRepositoryType: ECR_PUBLIC   # or ECR for private repo
+  AutoDeploymentsEnabled: true
+
+InstanceConfiguration:
+  Cpu: "0.25 vCPU"    # minimum – scale up for production
+  Memory: "0.5 GB"
+
+HealthCheckConfiguration:
+  Protocol: HTTP
+  Path: /health
+  Interval: 10
+  Timeout: 5
+  HealthyThreshold: 1
+  UnhealthyThreshold: 3
