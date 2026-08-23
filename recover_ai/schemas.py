@@ -1,119 +1,191 @@
 """
-RecoverAI Pydantic v2 Schemas
-Strict validation for all inbound and outbound data shapes.
+RecoverAI Enterprise – Pydantic v2 Strict Data Models
+All financial amounts are stored as INTEGER PAISE to avoid float imprecision.
 """
-
 from __future__ import annotations
 
+import os, sys
+_pkg = os.path.dirname(os.path.abspath(__file__))
+if _pkg not in sys.path: sys.path.insert(0, _pkg)
+
+from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-# ── Enums ─────────────────────────────────────────────────────────────────────
+# ── Domain Enumerations ───────────────────────────────────────────────────────
 
 class TransactionStatus(str, Enum):
-    FAILED     = "FAILED"
-    RECOVERING = "RECOVERING"
-    RECOVERED  = "RECOVERED"
-    EXPIRED    = "EXPIRED"
+    FAILED            = "FAILED"
+    ML_SCORED         = "ML_SCORED"
+    LOW_PRIORITY_SKIP = "LOW_PRIORITY_SKIP"
+    AGENT_EVALUATED   = "AGENT_EVALUATED"
+    ACTION_TRIGGERED  = "ACTION_TRIGGERED"
+    RECOVERING        = "RECOVERING"
+    RECOVERED         = "RECOVERED"
+    EXPIRED           = "EXPIRED"
 
 
-class RootCause(str, Enum):
-    BANK_DOWNTIME      = "Bank Downtime"
-    CUSTOMER_DROP_OFF  = "Customer Drop-off"
-    INSUFFICIENT_FUNDS = "Insufficient Funds"
-    UNKNOWN            = "Unknown"
+class FailureCategory(str, Enum):
+    GATEWAY_DOWN       = "GATEWAY_DOWN"
+    USER_CANCELLED     = "USER_CANCELLED"
+    NETWORK_TIMEOUT    = "NETWORK_TIMEOUT"
+    INSUFFICIENT_FUNDS = "INSUFFICIENT_FUNDS"
+    INVALID_DETAILS    = "INVALID_DETAILS"
+    BANK_DECLINE       = "BANK_DECLINE"
+    UNKNOWN            = "UNKNOWN"
 
 
-class RecoveryAction(str, Enum):
-    RETRY_PAYMENT         = "RETRY_PAYMENT"
-    SEND_REMINDER_EMAIL   = "SEND_REMINDER_EMAIL"
-    OFFER_EMI             = "OFFER_EMI"
-    OFFER_ALTERNATE_UPI   = "OFFER_ALTERNATE_UPI"
-    NOTIFY_SUPPORT        = "NOTIFY_SUPPORT"
-    NO_ACTION             = "NO_ACTION"
+class RecoveryActionType(str, Enum):
+    RETRY_PAYMENT       = "RETRY_PAYMENT"
+    SEND_REMINDER       = "SEND_REMINDER"
+    OFFER_EMI           = "OFFER_EMI"
+    OFFER_ALTERNATE_UPI = "OFFER_ALTERNATE_UPI"
+    NOTIFY_SUPPORT      = "NOTIFY_SUPPORT"
+    NO_ACTION           = "NO_ACTION"
 
 
 class AuditSource(str, Enum):
     LLM         = "llm"
     RULE_ENGINE = "rule_engine"
+    ML_SCORER   = "ml_scorer"
+    SYSTEM      = "system"
 
 
-# ── Razorpay Webhook Payload ──────────────────────────────────────────────────
+# ── Webhook Payload Models ────────────────────────────────────────────────────
 
-class PaymentEntity(BaseModel):
+class RazorpayPaymentEntity(BaseModel):
+    """Raw Razorpay payment entity — amounts in paise (integer)."""
     model_config = {"extra": "allow"}
 
     id: str = Field(..., min_length=1)
     order_id: str = Field(..., min_length=1)
-    amount: int = Field(..., gt=0, description="Amount in paise")
-    currency: str = Field(default="INR", min_length=3, max_length=3)
-    error_code: str | None = None
-    error_description: str | None = None
-    error_reason: str | None = None
-    error_source: str | None = None
+    amount: int = Field(..., gt=0, description="Amount in paise (integer)")
+    currency: str = Field(default="INR")
+    status: str = Field(default="failed")
+    method: Optional[str] = None
+    error_code: Optional[str] = None
+    error_description: Optional[str] = None
+    error_reason: Optional[str] = None
+    error_source: Optional[str] = None
+    # PII fields — will be redacted before persistence
+    email: Optional[str] = None
+    contact: Optional[str] = None
+    card: Optional[dict[str, Any]] = None
 
-    @field_validator("currency")
+    @field_validator("currency", mode="before")
     @classmethod
-    def currency_uppercase(cls, v: str) -> str:
+    def upper_currency(cls, v: str) -> str:
         return v.upper()
 
     @property
-    def amount_in_rupees(self) -> float:
-        return self.amount / 100
-
-
-class PaymentPayload(BaseModel):
-    payment: dict[str, PaymentEntity]
-
-    @model_validator(mode="before")
-    @classmethod
-    def ensure_payment_key(cls, values: Any) -> Any:
-        if "payment" not in values:
-            raise ValueError("Payload must contain a 'payment' key")
-        return values
+    def amount_rupees(self) -> Decimal:
+        """Exact decimal conversion: paise → rupees."""
+        return Decimal(self.amount) / Decimal(100)
 
     @property
-    def entity(self) -> PaymentEntity:
-        return self.payment.get("entity") or next(iter(self.payment.values()))
+    def amount_rupees_float(self) -> float:
+        """Float representation for ML features only."""
+        return float(self.amount_rupees)
 
 
-class RazorpayWebhookEvent(BaseModel):
-    """Top-level Razorpay webhook envelope."""
+class RazorpayWebhookPayload(BaseModel):
+    model_config = {"extra": "allow"}
+
+    payment: dict[str, RazorpayPaymentEntity]
+
+    @property
+    def entity(self) -> RazorpayPaymentEntity:
+        if "entity" in self.payment:
+            return self.payment["entity"]
+        return next(iter(self.payment.values()))
+
+
+class PaymentFailurePayload(BaseModel):
+    """Top-level validated webhook envelope."""
     model_config = {"extra": "allow"}
 
     entity: str = Field(default="event")
-    event: str = Field(..., min_length=1)
-    payload: PaymentPayload
-    account_id: str | None = None
+    event: str
+    payload: RazorpayWebhookPayload
+    account_id: Optional[str] = None
     contains: list[str] = Field(default_factory=list)
 
-
-# ── Agent I/O ─────────────────────────────────────────────────────────────────
-
-class ClassificationResult(BaseModel):
-    root_cause: RootCause
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    reasoning: str
+    @model_validator(mode="after")
+    def check_failure_event(self) -> "PaymentFailurePayload":
+        if "failed" not in self.event.lower() and "payment" not in self.event.lower():
+            raise ValueError(f"Unsupported event type: {self.event}")
+        return self
 
 
-class RecoveryDecision(BaseModel):
+# ── Internal Processing Models ────────────────────────────────────────────────
+
+class ProcessedTransaction(BaseModel):
+    payment_id: str
+    order_id: str
+    amount_paise: int                          # Always integer paise
+    amount_rupees: Decimal
+    currency: str = "INR"
+    failure_code: Optional[str] = None
+    failure_reason: Optional[str] = None
+    failure_category: FailureCategory = FailureCategory.UNKNOWN
+    email_redacted: Optional[str] = None
+    status: TransactionStatus = TransactionStatus.FAILED
+    recoverability_score: float = 0.0
+    recovery_attempts: int = 0
+
+
+class AgentState(BaseModel):
+    transaction: ProcessedTransaction
+    failure_category: FailureCategory
+    recoverability_score: float
+    recovery_attempt_number: int
+    llm_available: bool = True
+    guardrail_triggered: bool = False
+
+
+class RecoveryAction(BaseModel):
     transaction_id: str
-    action: RecoveryAction
+    action: RecoveryActionType
     reasoning: str
-    source: AuditSource = AuditSource.LLM
+    source: AuditSource
+    discount_pct: float = 0.0                  # Guardrail enforces ≤ 15%
     new_status: TransactionStatus
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @field_validator("discount_pct")
+    @classmethod
+    def cap_discount(cls, v: float) -> float:
+        from config import get_settings
+        max_d = get_settings().max_discount_pct
+        if v > max_d:
+            raise ValueError(f"Discount {v}% exceeds guardrail cap of {max_d}%")
+        return round(v, 2)
+
+
+class AuditEntry(BaseModel):
+    transaction_id: str
+    action_taken: str
+    decision_rationale: str
+    source: AuditSource
+    recoverability_score: float
+    previous_hash: str
+    current_hash: str
 
 
 # ── API Response Models ───────────────────────────────────────────────────────
 
 class WebhookAck(BaseModel):
     status: str = "ok"
-    message: str = "Webhook received"
+    message: str
+    payment_id: str
 
 
 class HealthResponse(BaseModel):
-    status: str = "healthy"
+    status: str
     version: str
+    environment: str
     db_ok: bool
+    queue_depth: int
+    ledger_ok: bool

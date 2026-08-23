@@ -1,71 +1,53 @@
 version: "3.9"
 
+x-common: &common
+  build: { context: ., target: runtime }
+  env_file: .env
+  restart: unless-stopped
+
 services:
-  # ── FastAPI Webhook API ────────────────────────────────────────────────────
   api:
-    build:
-      context: .
-      target: runtime
+    <<: *common
     container_name: recoverai-api
     command: uvicorn recover_ai.main:app --host 0.0.0.0 --port 8000
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    volumes:
-      # Persist SQLite database across container restarts
-      - db_data:/app/data
+    ports: ["8000:8000"]
+    volumes: ["db_data:/app/data"]
     environment:
-      - DATABASE_PATH=/app/data/recover_ai.db
+      DATABASE_PATH: /app/data/recover_ai_enterprise.db
+      ML_MODEL_PATH: /app/data/recover_ai_lgbm.pkl
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 15s
       timeout: 5s
       retries: 3
-    restart: unless-stopped
 
-  # ── Streamlit Dashboard ────────────────────────────────────────────────────
   dashboard:
-    build:
-      context: .
-      target: runtime
+    <<: *common
     container_name: recoverai-dashboard
     command: >
-      streamlit run recover_ai/app.py
+      streamlit run streamlit_app.py
       --server.port=8501
       --server.address=0.0.0.0
       --server.headless=true
-    ports:
-      - "8501:8501"
-    env_file:
-      - .env
-    volumes:
-      - db_data:/app/data
+    ports: ["8501:8501"]
+    volumes: ["db_data:/app/data"]
     environment:
-      - DATABASE_PATH=/app/data/recover_ai.db
+      DATABASE_PATH: /app/data/recover_ai_enterprise.db
+      ML_MODEL_PATH: /app/data/recover_ai_lgbm.pkl
     depends_on:
-      api:
-        condition: service_healthy
-    restart: unless-stopped
+      api: { condition: service_healthy }
 
-  # ── Data Simulator (optional – comment out in production) ─────────────────
   simulator:
-    build:
-      context: .
-      target: runtime
+    <<: *common
     container_name: recoverai-simulator
     command: python recover_ai/data_simulator.py
-    env_file:
-      - .env
     environment:
-      - WEBHOOK_BASE_URL=http://api:8000
+      WEBHOOK_BASE_URL: http://api:8000
+      DATABASE_PATH: /app/data/recover_ai_enterprise.db
     depends_on:
-      api:
-        condition: service_healthy
-    restart: unless-stopped
-    profiles:
-      - dev          # Only starts with: docker compose --profile dev up
+      api: { condition: service_healthy }
+    profiles: [dev]
 
 volumes:
   db_data:
-    driver: local

@@ -1,27 +1,31 @@
 """
-RecoverAI Configuration
-Pydantic BaseSettings for all environment-driven config values.
+RecoverAI Enterprise – Configuration
+All settings are env-driven via pydantic-settings.
+Secrets are NEVER hard-coded; defaults are safe for local dev only.
 """
+from __future__ import annotations
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
-from functools import lru_cache
 import os
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _inject_streamlit_secrets() -> None:
     """
-    On Streamlit Cloud, secrets are in st.secrets (not os.environ).
-    This function copies them into os.environ so pydantic-settings picks them up
-    transparently, without any Streamlit dependency in non-dashboard modules.
+    Streamlit Cloud injects secrets via st.secrets, not os.environ.
+    Copy them into os.environ so pydantic-settings picks them up
+    transparently across all modules.
     """
     try:
         import streamlit as st  # noqa: PLC0415
-        for key, value in st.secrets.items():
-            if isinstance(value, str) and key not in os.environ:
-                os.environ[key.upper()] = value
+        for k, v in st.secrets.items():
+            if isinstance(v, str) and k.upper() not in os.environ:
+                os.environ[k.upper()] = v
     except Exception:
-        pass  # Not running inside Streamlit – no-op
+        pass
 
 
 _inject_streamlit_secrets()
@@ -32,43 +36,59 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
-    # ── App ────────────────────────────────────────────────────────────────
-    app_name: str = "RecoverAI"
-    app_version: str = "1.0.0"
-    debug: bool = False
+    # ── Identity ──────────────────────────────────────────────────────────
+    app_name: str = "RecoverAI Enterprise"
+    app_version: str = "2.0.0"
+    environment: Literal["development", "staging", "production"] = "development"
 
-    # ── Webhook Security ───────────────────────────────────────────────────
+    # ── Security ──────────────────────────────────────────────────────────
     razorpay_webhook_secret: str = Field(
-        default="dev_webhook_secret_change_in_production",
-        description="HMAC-SHA256 signing secret from Razorpay dashboard",
+        default="dev_secret_replace_in_production",
+        description="HMAC-SHA256 secret from Razorpay dashboard",
     )
 
-    # ── Database ───────────────────────────────────────────────────────────
-    database_path: str = "recover_ai.db"
+    # ── Database ──────────────────────────────────────────────────────────
+    database_path: str = "recover_ai_enterprise.db"
 
-    # ── AI / LLM ───────────────────────────────────────────────────────────
-    openai_api_key: str = Field(
-        default="",
-        description="OpenAI API key (optional – fallback rule engine activates if blank)",
-    )
+    # ── LLM / AI ──────────────────────────────────────────────────────────
+    openai_api_key: str = Field(default="", description="Leave blank → rule engine only")
     llm_model: str = "gpt-4o-mini"
-    llm_timeout_seconds: float = 3.0          # Hard SLA – fall back if exceeded
-    llm_max_tokens: int = 256
+    llm_timeout_seconds: float = 3.0
+    llm_max_tokens: int = 300
 
-    # ── Recovery Business Rules ────────────────────────────────────────────
+    # ── ML Scorer ─────────────────────────────────────────────────────────
+    ml_model_path: str = "recover_ai_lgbm.pkl"
+    ml_low_priority_threshold: float = 0.15   # Below this → LOW_PRIORITY_SKIP
+
+    # ── Business Rules ────────────────────────────────────────────────────
     max_recovery_attempts: int = 2
-    recovery_window_hours: int = 24           # Transactions older than this are EXPIRED
+    max_discount_pct: float = 15.0             # Guardrail: LLM cannot exceed this
+    recovery_window_hours: int = 24
+
+    # ── Queue ─────────────────────────────────────────────────────────────
+    queue_max_size: int = 10_000
+    queue_workers: int = 4
 
     # ── Simulator ─────────────────────────────────────────────────────────
     simulator_interval_seconds: float = 5.0
     webhook_base_url: str = "http://127.0.0.1:8000"
-    min_transaction_amount: float = 500.0
-    max_transaction_amount: float = 15000.0
+    min_transaction_amount_paise: int = 50_000     # ₹500
+    max_transaction_amount_paise: int = 1_500_000  # ₹15,000
 
     # ── Dashboard ─────────────────────────────────────────────────────────
     dashboard_refresh_seconds: int = 5
+
+    @field_validator("environment", mode="before")
+    @classmethod
+    def lowercase_env(cls, v: str) -> str:
+        return v.lower()
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
 
 
 @lru_cache(maxsize=1)

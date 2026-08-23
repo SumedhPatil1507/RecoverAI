@@ -1,323 +1,365 @@
 """
-RecoverAI Agent Engine
-Async AI-powered classification and recovery decision engine.
-• Primary path : OpenAI LLM with 3-second hard timeout
-• Fallback path: Deterministic rule engine (zero-dependency, instant)
-• Business rule : Maximum 2 recovery attempts per transaction
+RecoverAI Enterprise – Async Multi-Agent Recovery Orchestrator
 """
-
 from __future__ import annotations
+
+import os, sys
+_pkg = os.path.dirname(os.path.abspath(__file__))
+if _pkg not in sys.path: sys.path.insert(0, _pkg)
 
 import asyncio
 import json
 import logging
+import random
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+import database as db
 from config import get_settings
+from ml_scorer import MLRecoveryScorer
 from schemas import (
     AuditSource,
-    ClassificationResult,
+    FailureCategory,
+    ProcessedTransaction,
     RecoveryAction,
-    RecoveryDecision,
-    RootCause,
+    RecoveryActionType,
     TransactionStatus,
 )
-import database as db
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-# ── Rule Engine (deterministic fallback) ─────────────────────────────────────
+# ── Deterministic Rule Matrix ─────────────────────────────────────────────────
 
-# Maps substrings found in failure codes / reasons → root causes
-_FAILURE_CODE_MAP: dict[str, RootCause] = {
-    "BAD_REQUEST_ERROR":        RootCause.CUSTOMER_DROP_OFF,
-    "GATEWAY_ERROR":            RootCause.BANK_DOWNTIME,
-    "SERVER_ERROR":             RootCause.BANK_DOWNTIME,
-    "PAYMENT_CANCELLED":        RootCause.CUSTOMER_DROP_OFF,
-    "USER_CANCELLED":           RootCause.CUSTOMER_DROP_OFF,
-    "INSUFFICIENT_FUNDS":       RootCause.INSUFFICIENT_FUNDS,
-    "LOW_BALANCE":              RootCause.INSUFFICIENT_FUNDS,
-    "PAYMENT_FAILED":           RootCause.BANK_DOWNTIME,
-    "NETWORK_ERROR":            RootCause.BANK_DOWNTIME,
-    "TIMEOUT":                  RootCause.BANK_DOWNTIME,
-    "INVALID_CARD":             RootCause.CUSTOMER_DROP_OFF,
+_CATEGORY_MAP: dict[str, FailureCategory] = {
+    "GATEWAY_ERROR":      FailureCategory.GATEWAY_DOWN,
+    "GATEWAY_DOWN":       FailureCategory.GATEWAY_DOWN,
+    "SERVER_ERROR":       FailureCategory.GATEWAY_DOWN,
+    "NETWORK_ERROR":      FailureCategory.NETWORK_TIMEOUT,
+    "NETWORK_TIMEOUT":    FailureCategory.NETWORK_TIMEOUT,
+    "TIMEOUT":            FailureCategory.NETWORK_TIMEOUT,
+    "PAYMENT_CANCELLED":  FailureCategory.USER_CANCELLED,
+    "USER_CANCELLED":     FailureCategory.USER_CANCELLED,
+    "BAD_REQUEST_ERROR":  FailureCategory.USER_CANCELLED,
+    "INSUFFICIENT_FUNDS": FailureCategory.INSUFFICIENT_FUNDS,
+    "LOW_BALANCE":        FailureCategory.INSUFFICIENT_FUNDS,
+    "INVALID_CARD":       FailureCategory.INVALID_DETAILS,
+    "INVALID_DETAILS":    FailureCategory.INVALID_DETAILS,
+    "CARD_DECLINED":      FailureCategory.BANK_DECLINE,
+    "BANK_DECLINE":       FailureCategory.BANK_DECLINE,
 }
 
-# Maps root causes → best recovery action
-_RECOVERY_MAP: dict[RootCause, RecoveryAction] = {
-    RootCause.BANK_DOWNTIME:      RecoveryAction.RETRY_PAYMENT,
-    RootCause.CUSTOMER_DROP_OFF:  RecoveryAction.SEND_REMINDER_EMAIL,
-    RootCause.INSUFFICIENT_FUNDS: RecoveryAction.OFFER_EMI,
-    RootCause.UNKNOWN:            RecoveryAction.NOTIFY_SUPPORT,
+# attempt 1 / attempt 2 escalation matrix
+_ACTION_MATRIX: dict[FailureCategory, tuple[RecoveryActionType, RecoveryActionType]] = {
+    FailureCategory.GATEWAY_DOWN:       (RecoveryActionType.RETRY_PAYMENT,       RecoveryActionType.OFFER_ALTERNATE_UPI),
+    FailureCategory.NETWORK_TIMEOUT:    (RecoveryActionType.RETRY_PAYMENT,       RecoveryActionType.OFFER_ALTERNATE_UPI),
+    FailureCategory.USER_CANCELLED:     (RecoveryActionType.SEND_REMINDER,       RecoveryActionType.OFFER_EMI),
+    FailureCategory.INSUFFICIENT_FUNDS: (RecoveryActionType.OFFER_EMI,           RecoveryActionType.NOTIFY_SUPPORT),
+    FailureCategory.INVALID_DETAILS:    (RecoveryActionType.SEND_REMINDER,       RecoveryActionType.NOTIFY_SUPPORT),
+    FailureCategory.BANK_DECLINE:       (RecoveryActionType.OFFER_ALTERNATE_UPI, RecoveryActionType.NOTIFY_SUPPORT),
+    FailureCategory.UNKNOWN:            (RecoveryActionType.NOTIFY_SUPPORT,      RecoveryActionType.NO_ACTION),
 }
 
 
-def _rule_classify(failure_code: str | None, failure_reason: str | None) -> ClassificationResult:
-    """Deterministic classification – O(n) scan over known failure codes."""
+def _classify_failure(failure_code: str | None, failure_reason: str | None) -> FailureCategory:
     combined = f"{(failure_code or '').upper()} {(failure_reason or '').upper()}"
-
-    for key, cause in _FAILURE_CODE_MAP.items():
+    for key, cat in _CATEGORY_MAP.items():
         if key in combined:
-            return ClassificationResult(
-                root_cause=cause,
-                confidence=0.85,
-                reasoning=f"Rule engine matched pattern '{key}' in failure descriptor.",
-            )
-
-    return ClassificationResult(
-        root_cause=RootCause.UNKNOWN,
-        confidence=0.50,
-        reasoning="No matching rule found; defaulting to UNKNOWN for manual review.",
-    )
+            return cat
+    return FailureCategory.UNKNOWN
 
 
-def _rule_recover(
+def _rule_engine_decide(
     txn_id: str,
-    root_cause: RootCause,
+    category: FailureCategory,
+    score: float,
     attempts: int,
-) -> RecoveryDecision:
-    """Deterministic recovery decision based on root cause and attempt count."""
+) -> RecoveryAction:
     if attempts >= settings.max_recovery_attempts:
-        return RecoveryDecision(
+        return RecoveryAction(
             transaction_id=txn_id,
-            action=RecoveryAction.NO_ACTION,
-            reasoning=f"Max recovery attempts ({settings.max_recovery_attempts}) reached. Expiring transaction.",
+            action=RecoveryActionType.NO_ACTION,
+            reasoning=f"Max recovery attempts ({settings.max_recovery_attempts}) reached. Marking EXPIRED.",
             source=AuditSource.RULE_ENGINE,
             new_status=TransactionStatus.EXPIRED,
+            confidence=1.0,
         )
 
-    action = _RECOVERY_MAP.get(root_cause, RecoveryAction.NOTIFY_SUPPORT)
+    actions = _ACTION_MATRIX.get(category, _ACTION_MATRIX[FailureCategory.UNKNOWN])
+    action = actions[min(attempts, 1)]
 
-    # Second attempt: escalate the action
-    if attempts == 1:
-        if root_cause == RootCause.BANK_DOWNTIME:
-            action = RecoveryAction.OFFER_ALTERNATE_UPI
-        elif root_cause == RootCause.CUSTOMER_DROP_OFF:
-            action = RecoveryAction.OFFER_EMI
-        elif root_cause == RootCause.INSUFFICIENT_FUNDS:
-            action = RecoveryAction.NOTIFY_SUPPORT
-
-    return RecoveryDecision(
+    return RecoveryAction(
         transaction_id=txn_id,
         action=action,
         reasoning=(
-            f"Rule engine selected '{action.value}' for root cause "
-            f"'{root_cause.value}' (attempt {attempts + 1}/{settings.max_recovery_attempts})."
+            f"Rule engine: category={category.value}, "
+            f"score={score:.2f}, attempt={attempts + 1}/{settings.max_recovery_attempts}. "
+            f"Selected '{action.value}' from deterministic matrix."
         ),
         source=AuditSource.RULE_ENGINE,
-        new_status=TransactionStatus.RECOVERING,
+        new_status=TransactionStatus.ACTION_TRIGGERED,
+        confidence=0.85,
     )
 
 
-# ── LLM Path ──────────────────────────────────────────────────────────────────
+# ── LLM Agent ─────────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """You are a payment failure analyst for an Indian fintech platform.
-Given a failed transaction, you must:
-1. Classify the root cause as exactly one of: "Bank Downtime", "Customer Drop-off", "Insufficient Funds", "Unknown"
-2. Recommend a recovery action from: RETRY_PAYMENT, SEND_REMINDER_EMAIL, OFFER_EMI, OFFER_ALTERNATE_UPI, NOTIFY_SUPPORT, NO_ACTION
-3. Provide a brief, actionable reasoning (max 2 sentences).
-
-Respond ONLY with valid JSON in this exact format:
+_SYSTEM_PROMPT = """You are a payment recovery specialist for an Indian fintech platform.
+Analyse the failed transaction and respond ONLY with a valid JSON object:
 {
-  "root_cause": "<one of the four options>",
-  "confidence": <float 0.0-1.0>,
-  "reasoning": "<brief explanation>",
-  "action": "<one of the six actions>"
-}"""
+  "failure_category": one of [GATEWAY_DOWN, USER_CANCELLED, NETWORK_TIMEOUT, INSUFFICIENT_FUNDS, INVALID_DETAILS, BANK_DECLINE, UNKNOWN],
+  "action": one of [RETRY_PAYMENT, SEND_REMINDER, OFFER_EMI, OFFER_ALTERNATE_UPI, NOTIFY_SUPPORT, NO_ACTION],
+  "confidence": float 0.0-1.0,
+  "discount_pct": float (MUST be 0.0 unless explicitly justified, NEVER exceed 15.0),
+  "reasoning": string max 2 sentences
+}
+GUARDRAIL: discount_pct > 15.0 is FORBIDDEN and will be rejected. Do not suggest refunds or policy changes."""
 
 
-async def _llm_classify_and_recover(
-    txn_id: str,
-    failure_code: str | None,
-    failure_reason: str | None,
-    amount: float,
+@retry(
+    retry=retry_if_exception_type(Exception),
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=0.5, min=0.5, max=2),
+    reraise=False,
+)
+async def _call_llm(user_message: str) -> dict[str, Any] | None:
+    if not settings.openai_api_key:
+        return None
+    import httpx
+    async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds) as client:
+        resp = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.llm_model,
+                "messages": [
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_message},
+                ],
+                "max_tokens": settings.llm_max_tokens,
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+
+async def _llm_decide(
+    txn: ProcessedTransaction,
+    category: FailureCategory,
+    score: float,
     attempts: int,
-) -> tuple[ClassificationResult, RecoveryDecision] | None:
+) -> RecoveryAction | None:
     """
-    Call OpenAI with a strict 3-second timeout.
-    Returns None on any failure so the caller falls back to the rule engine.
+    Call LLM with 3s hard timeout + guardrail enforcement.
+    Returns None on any failure so the caller falls back to rule engine.
     """
     if not settings.openai_api_key:
         return None
 
+    user_msg = (
+        f"Payment ID: {txn.payment_id}\n"
+        f"Amount: ₹{txn.amount_rupees:.2f}\n"
+        f"Failure Code: {txn.failure_code or 'N/A'}\n"
+        f"Failure Reason: {txn.failure_reason or 'N/A'}\n"
+        f"Pre-classified Category: {category.value}\n"
+        f"ML Recoverability Score: {score:.2f}\n"
+        f"Previous Recovery Attempts: {attempts}"
+    )
+
     try:
-        import httpx  # Lazy import – not needed in rule-engine-only deployments
+        raw = await asyncio.wait_for(_call_llm(user_msg), timeout=settings.llm_timeout_seconds)
+        if raw is None:
+            return None
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
 
-        user_message = (
-            f"Transaction ID: {txn_id}\n"
-            f"Amount: ₹{amount:.2f}\n"
-            f"Failure Code: {failure_code or 'N/A'}\n"
-            f"Failure Reason: {failure_reason or 'N/A'}\n"
-            f"Previous Recovery Attempts: {attempts}"
-        )
-
-        payload: dict[str, Any] = {
-            "model": settings.llm_model,
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            "max_tokens": settings.llm_max_tokens,
-            "temperature": 0.1,
-            "response_format": {"type": "json_object"},
-        }
-
-        async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.openai_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
+        # ── Guardrail enforcement ──────────────────────────────────────────
+        discount = float(parsed.get("discount_pct", 0.0))
+        guardrail_triggered = False
+        if discount > settings.max_discount_pct:
+            logger.warning(
+                "GUARDRAIL TRIGGERED: LLM proposed %.1f%% discount for %s → capped to 0%%",
+                discount, txn.payment_id,
             )
-            response.raise_for_status()
+            discount = 0.0
+            guardrail_triggered = True
 
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-
-        # Validate and normalise the LLM response
-        root_cause_str = parsed.get("root_cause", "Unknown")
+        # Parse action
         try:
-            root_cause = RootCause(root_cause_str)
+            action = RecoveryActionType(parsed.get("action", "NOTIFY_SUPPORT"))
         except ValueError:
-            root_cause = RootCause.UNKNOWN
+            action = RecoveryActionType.NOTIFY_SUPPORT
 
-        action_str = parsed.get("action", "NOTIFY_SUPPORT")
+        # Parse category override
         try:
-            action = RecoveryAction(action_str)
+            cat_override = FailureCategory(parsed.get("failure_category", category.value))
         except ValueError:
-            action = RecoveryAction.NOTIFY_SUPPORT
+            cat_override = category
 
-        classification = ClassificationResult(
-            root_cause=root_cause,
-            confidence=float(parsed.get("confidence", 0.8)),
-            reasoning=parsed.get("reasoning", "LLM provided no reasoning."),
-        )
-
-        new_status = (
-            TransactionStatus.EXPIRED
-            if attempts >= settings.max_recovery_attempts
-            else TransactionStatus.RECOVERING
-        )
-        if action == RecoveryAction.NO_ACTION:
+        # Determine new status
+        if attempts + 1 >= settings.max_recovery_attempts:
             new_status = TransactionStatus.EXPIRED
+        else:
+            new_status = TransactionStatus.ACTION_TRIGGERED
 
-        decision = RecoveryDecision(
-            transaction_id=txn_id,
+        reasoning = parsed.get("reasoning", "LLM provided no reasoning.")
+        if guardrail_triggered:
+            reasoning += " [GUARDRAIL: proposed discount rejected and zeroed]"
+
+        return RecoveryAction(
+            transaction_id=txn.payment_id,
             action=action,
-            reasoning=parsed.get("reasoning", ""),
+            reasoning=reasoning,
             source=AuditSource.LLM,
+            discount_pct=discount,
             new_status=new_status,
+            confidence=float(parsed.get("confidence", 0.8)),
         )
-
-        return classification, decision
 
     except asyncio.TimeoutError:
-        logger.warning("LLM call timed out for txn %s – activating rule engine", txn_id)
+        logger.warning("LLM timeout for txn %s → activating rule engine", txn.payment_id)
         return None
     except Exception as exc:
-        logger.warning("LLM call failed for txn %s (%s) – activating rule engine", txn_id, exc)
+        logger.warning("LLM error for txn %s (%s) → rule engine", txn.payment_id, exc)
         return None
 
 
-# ── Public Entry Point ────────────────────────────────────────────────────────
+# ── Public pipeline entry point ───────────────────────────────────────────────
 
-async def process_failed_transaction(
-    txn_id: str,
+async def process_failed_payment(
     payment_id: str,
     order_id: str,
-    amount: float,
+    amount_paise: int,
     currency: str,
     failure_code: str | None,
     failure_reason: str | None,
+    email_redacted: str | None,
 ) -> None:
     """
     Full agent pipeline:
-    1. Persist the transaction (idempotent upsert).
-    2. Load current attempt count (enforce max-attempts guard).
-    3. Try LLM classification + recovery decision.
-    4. Fall back to rule engine on timeout / error.
-    5. Persist classification, decision, and audit log.
+    1. Persist raw transaction
+    2. ML scoring → LOW_PRIORITY_SKIP guard
+    3. LLM classification + decision (with timeout)
+    4. Deterministic fallback if LLM fails
+    5. Guardrail validation
+    6. Persistence + immutable audit log
     """
-    logger.info("Agent processing txn=%s amount=₹%.2f", txn_id, amount)
+    amount_rupees = float(Decimal(amount_paise) / Decimal(100))
+    logger.info("Agent pipeline: txn=%s ₹%.2f", payment_id, amount_rupees)
 
-    # 1. Persist / update transaction record
+    # 1. Persist
     db.upsert_transaction(
-        txn_id, payment_id, order_id, amount, currency, failure_code, failure_reason
+        payment_id, order_id, amount_paise, currency,
+        failure_code, failure_reason, email_redacted,
     )
 
-    # 2. Load attempt count
-    txn = db.get_transaction(txn_id)
-    current_attempts = txn["recovery_attempts"] if txn else 0
+    txn_row = db.get_transaction(payment_id)
+    attempts = txn_row["recovery_attempts"] if txn_row else 0
 
-    # Business rule: hard cap on recovery attempts
-    if current_attempts >= settings.max_recovery_attempts:
-        db.update_transaction_status(txn_id, TransactionStatus.EXPIRED.value)
+    if attempts >= settings.max_recovery_attempts:
+        db.update_transaction(payment_id, TransactionStatus.EXPIRED.value)
         db.append_audit_log(
-            txn_id,
-            RecoveryAction.NO_ACTION.value,
-            f"Transaction expired after {current_attempts} recovery attempts.",
-            AuditSource.RULE_ENGINE.value,
+            payment_id,
+            RecoveryActionType.NO_ACTION.value,
+            f"Hard cap: {attempts} attempts exhausted.",
+            AuditSource.SYSTEM.value,
+            0.0,
         )
-        logger.info("Txn %s expired (max attempts reached)", txn_id)
         return
 
-    # 3. Attempt LLM path (with timeout)
-    llm_result = await _llm_classify_and_recover(
-        txn_id, failure_code, failure_reason, amount, current_attempts
-    )
+    # 2. ML scoring
+    scorer = MLRecoveryScorer.get()
+    hour = datetime.now(timezone.utc).hour
+    score = scorer.score(amount_rupees, failure_code, attempts, hour)
+    db.update_transaction(payment_id, TransactionStatus.ML_SCORED.value, recoverability_score=score)
 
-    if llm_result:
-        classification, decision = llm_result
-        source_label = "LLM"
-    else:
-        # 4. Deterministic fallback
-        classification = _rule_classify(failure_code, failure_reason)
-        decision = _rule_recover(txn_id, classification.root_cause, current_attempts)
-        source_label = "Rule Engine"
-
-    # 5. Simulate a recovery success probability for demo realism
-    #    (In production this would be the actual downstream retry outcome)
-    import random
-    recovery_success = random.random() < 0.45  # ~45% first-pass recovery rate
-
-    if decision.new_status == TransactionStatus.RECOVERING and recovery_success:
-        final_status = TransactionStatus.RECOVERED
-        decision.reasoning += " [Simulated: downstream retry succeeded]"
-    else:
-        final_status = decision.new_status
-
-    # Persist classification
-    db.update_transaction_status(
-        txn_id,
-        final_status.value,
-        classification.root_cause.value,
-    )
-
-    # Increment attempt counter
-    db.increment_recovery_attempts(txn_id)
-
-    # Write immutable audit log
     db.append_audit_log(
-        transaction_id=txn_id,
-        action=decision.action.value,
-        reasoning=(
-            f"[{source_label}] Root cause: {classification.root_cause.value} "
-            f"(confidence={classification.confidence:.0%}). "
-            f"Action: {decision.action.value}. {decision.reasoning}"
-        ),
-        source=decision.source.value,
+        payment_id,
+        "ML_SCORED",
+        f"Recoverability score={score:.4f} (threshold={settings.ml_low_priority_threshold})",
+        AuditSource.ML_SCORER.value,
+        score,
+    )
+
+    if scorer.is_low_priority(score):
+        db.update_transaction(payment_id, TransactionStatus.LOW_PRIORITY_SKIP.value)
+        db.append_audit_log(
+            payment_id,
+            "LOW_PRIORITY_SKIP",
+            f"Score {score:.4f} < {settings.ml_low_priority_threshold} threshold → skipped to conserve API budget.",
+            AuditSource.SYSTEM.value,
+            score,
+        )
+        logger.info("Txn %s skipped (low priority score=%.4f)", payment_id, score)
+        return
+
+    # 3. Classify failure
+    category = _classify_failure(failure_code, failure_reason)
+    db.update_transaction(payment_id, TransactionStatus.AGENT_EVALUATED.value, failure_category=category.value)
+
+    # 4. Build transaction object for LLM
+    txn = ProcessedTransaction(
+        payment_id=payment_id,
+        order_id=order_id,
+        amount_paise=amount_paise,
+        amount_rupees=Decimal(amount_paise) / Decimal(100),
+        currency=currency,
+        failure_code=failure_code,
+        failure_reason=failure_reason,
+        failure_category=category,
+        email_redacted=email_redacted,
+        recoverability_score=score,
+        recovery_attempts=attempts,
+    )
+
+    # 5. LLM → rule engine fallback
+    decision = await _llm_decide(txn, category, score, attempts)
+    if decision is None:
+        decision = _rule_engine_decide(payment_id, category, score, attempts)
+
+    # 6. Simulate downstream recovery outcome (realistic ~45% pass rate for demo)
+    final_status = decision.new_status
+    if decision.new_status == TransactionStatus.ACTION_TRIGGERED:
+        recovery_succeeded = random.random() < (0.30 + score * 0.45)
+        final_status = (
+            TransactionStatus.RECOVERED if recovery_succeeded
+            else TransactionStatus.RECOVERING
+        )
+
+    # 7. Persist results
+    db.update_transaction(payment_id, final_status.value, failure_category=category.value, recoverability_score=score)
+    db.increment_attempts(payment_id)
+
+    rationale = (
+        f"[{decision.source.value.upper()}] "
+        f"Category={category.value} | Score={score:.4f} | "
+        f"Action={decision.action.value} | Status={final_status.value} | "
+        f"{decision.reasoning}"
+    )
+
+    db.append_audit_log(
+        payment_id,
+        decision.action.value,
+        rationale,
+        decision.source.value,
+        score,
     )
 
     logger.info(
-        "Txn %s → status=%s cause=%s action=%s via %s",
-        txn_id,
-        final_status.value,
-        classification.root_cause.value,
-        decision.action.value,
-        source_label,
+        "Txn %s complete: category=%s score=%.4f action=%s status=%s via %s",
+        payment_id, category.value, score,
+        decision.action.value, final_status.value, decision.source.value,
     )

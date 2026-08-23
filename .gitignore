@@ -26,12 +26,17 @@ env/
 ENV/
 .virtualenv/
 
-# ── Database files (runtime state – not committed) ────────────────────────────
+# ── Database files (runtime state) ────────────────────────────────────────────
 *.db
 *.db-shm
 *.db-wal
 *.sqlite
 *.sqlite3
+
+# ── ML model artifacts (regenerated on first run) ─────────────────────────────
+*.pkl
+*.joblib
+*.lgbm
 
 # ── Streamlit ─────────────────────────────────────────────────────────────────
 .streamlit/secrets.toml

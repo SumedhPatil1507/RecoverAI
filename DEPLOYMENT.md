@@ -1,167 +1,146 @@
-# RecoverAI — Deployment Guide
+# RecoverAI Enterprise — Deployment Guide
 
-This guide covers every step from a blank machine to a live deployment on:
-- **GitHub** (source control + CI/CD)
-- **Streamlit Cloud** (dashboard)
-- **Render** (API + dashboard, free tier)
-- **Railway** (API)
-- **AWS App Runner** (API via Docker)
-- **Azure App Service** (API + dashboard)
-- **Docker / Self-hosted** (any VPS, EC2, DigitalOcean)
+Complete step-by-step instructions for every supported platform.
 
 ---
 
-## Repo Structure (what GitHub will hold)
+## Repo Structure (what GitHub holds)
 
 ```
-RecoverAI/                     ← git repo root
-├── recover_ai/                ← application package
-│   ├── __init__.py
-│   ├── config.py
-│   ├── security.py
-│   ├── database.py
-│   ├── schemas.py
-│   ├── agent_engine.py
-│   ├── main.py                ← FastAPI app
-│   ├── app.py                 ← Streamlit dashboard
-│   ├── data_simulator.py
-│   └── requirements.txt
-├── streamlit_app.py           ← Streamlit Cloud entry point (repo root)
-├── requirements.txt           ← root-level copy (required by cloud platforms)
-├── Dockerfile
-├── docker-compose.yml
-├── Procfile                   ← Heroku / Railway / Render
-├── render.yaml                ← Render blueprint
-├── railway.toml               ← Railway config
-├── azure/webapp.bicep         ← Azure Bicep IaC
-├── aws/apprunner.yaml         ← AWS App Runner config
-├── .streamlit/config.toml     ← Streamlit theme + server settings
-├── .streamlit/secrets.toml.example
-├── .github/workflows/deploy.yml
-├── .gitignore
-├── .env.example
-└── DEPLOYMENT.md              ← this file
+RecoverAI/
+├── recover_ai/          application package (all Python source)
+├── streamlit_app.py     Streamlit Cloud entry point  ← IMPORTANT
+├── requirements.txt     root-level deps (used by all cloud platforms)
+├── Dockerfile           multi-stage build
+├── docker-compose.yml   local / VPS deployment
+├── Procfile             Render / Railway
+├── render.yaml          Render Blueprint
+├── railway.toml         Railway config
+├── .env.example         env var template
+├── .streamlit/          Streamlit config + secrets template
+├── .github/workflows/   CI/CD pipeline
+├── aws/                 AWS App Runner config
+└── azure/               Azure Bicep IaC
 ```
 
 ---
 
-## Step 1 — Create the GitHub Repository
+## Step 1 — Push to GitHub
 
-### Option A: GitHub CLI (fastest)
+### Option A: GitHub CLI
 
 ```bash
-# Install GitHub CLI if needed: https://cli.github.com/
+cd C:\Users\Sumedh\projects\RecoverAI
+
 gh auth login
-
-cd C:\Users\Sumedh\projects\RecoverAI   # your project root
-git init
-git add .
-git commit -m "feat: initial RecoverAI system"
-
 gh repo create RecoverAI \
   --public \
-  --description "Agentic Payment Degradation & Abandonment Engine – Razorpay AI Buildathon Track 03" \
+  --description "Agentic Payment Degradation & Revenue Recovery Engine – Razorpay AI Buildathon Track 03" \
   --push \
   --source .
 ```
 
-### Option B: GitHub Web UI
+### Option B: Git + GitHub Web UI
 
-1. Go to **github.com → New repository**
-2. Name: `RecoverAI`, set to Public, **do NOT** tick "Add README" (we have one)
-3. Copy the remote URL, then:
+1. Create a new repo at github.com (no README, no .gitignore)
+2. Then:
 
 ```bash
 cd C:\Users\Sumedh\projects\RecoverAI
-git init
-git add .
-git commit -m "feat: initial RecoverAI system"
 git remote add origin https://github.com/YOUR_USERNAME/RecoverAI.git
 git branch -M main
 git push -u origin main
 ```
 
-### Add GitHub Secrets (for CI/CD)
+### Add GitHub Actions Secrets
 
-Go to **Repo → Settings → Secrets and variables → Actions → New repository secret**:
+Go to **Repo → Settings → Secrets and variables → Actions**:
 
-| Secret Name | Value |
-|---|---|
-| `RAZORPAY_WEBHOOK_SECRET` | your webhook signing secret |
-| `OPENAI_API_KEY` | your OpenAI key (or leave empty) |
-| `DOCKERHUB_USERNAME` | your Docker Hub username |
+| Secret | Value |
+|--------|-------|
+| `RAZORPAY_WEBHOOK_SECRET` | your webhook secret |
+| `OPENAI_API_KEY` | your OpenAI key (optional) |
+| `DOCKERHUB_USERNAME` | Docker Hub username |
 | `DOCKERHUB_TOKEN` | Docker Hub access token |
 
 ---
 
-## Step 2 — Deploy Dashboard on Streamlit Cloud (Free)
+## Step 2 — Streamlit Cloud (Dashboard — Free)
 
-> Streamlit Cloud hosts the **dashboard only**. The FastAPI API needs a separate host (Render, Railway, etc.).
+> Streamlit Cloud hosts the **dashboard only**.
+> The FastAPI API must run on a separate host (Render, Railway, etc.).
 
-1. Go to **share.streamlit.io** → Sign in with GitHub
+1. Go to **[share.streamlit.io](https://share.streamlit.io)** → Sign in with GitHub
 2. Click **New app**
 3. Fill in:
-   - **Repository**: `YOUR_USERNAME/RecoverAI`
-   - **Branch**: `main`
-   - **Main file path**: `streamlit_app.py`   ← root-level entry point
+   - **Repository:** `YOUR_USERNAME/RecoverAI`
+   - **Branch:** `main`
+   - **Main file path:** `streamlit_app.py`
 4. Click **Advanced settings → Secrets** and paste:
 
 ```toml
 RAZORPAY_WEBHOOK_SECRET = "your_secret"
 OPENAI_API_KEY          = ""
-DATABASE_PATH           = "recover_ai.db"
-WEBHOOK_BASE_URL        = "https://your-api-on-render.onrender.com"
+DATABASE_PATH           = "recover_ai_enterprise.db"
+ML_MODEL_PATH           = "recover_ai_lgbm.pkl"
+ENVIRONMENT             = "production"
+WEBHOOK_BASE_URL        = "https://YOUR-API.onrender.com"
 ```
 
-5. Click **Deploy** — live in ~2 minutes.
+5. Click **Deploy** — live in ~3 minutes.
 
-> **Note:** Streamlit Cloud uses an ephemeral filesystem. The SQLite DB resets on each redeploy. For persistence, swap SQLite for a hosted PostgreSQL (Supabase free tier works well).
+> **Note on persistence:** Streamlit Cloud uses an ephemeral filesystem.
+> The SQLite DB resets on redeploy. For production persistence, swap SQLite
+> for a hosted PostgreSQL (Supabase free tier recommended).
 
 ---
 
-## Step 3 — Deploy API on Render (Free Tier)
+## Step 3 — Render (API + Dashboard — Free Tier)
 
-1. Go to **render.com** → New → **Blueprint**
+### Via Blueprint (automatic — recommended)
+
+1. Go to **[render.com](https://render.com)** → New → **Blueprint**
 2. Connect your GitHub repo `RecoverAI`
-3. Render auto-detects `render.yaml` and creates both services
-4. Set the **environment variables** in the Render dashboard:
+3. Render reads `render.yaml` and creates both services automatically
+4. Set environment variables in the Render dashboard:
    - `RAZORPAY_WEBHOOK_SECRET`
    - `OPENAI_API_KEY` (optional)
-5. Click **Apply** — both services deploy automatically.
+5. Click **Apply**
 
-Your API will be live at: `https://recoverai-api.onrender.com`
+API URL: `https://recoverai-api-XXXX.onrender.com`
+Update `WEBHOOK_BASE_URL` in your Streamlit Cloud secrets to this URL.
 
-Update `WEBHOOK_BASE_URL` in Streamlit Cloud secrets to this URL.
+### Manual Render Deploy
 
----
-
-## Step 4 — Deploy API on Railway
-
-1. Go to **railway.app** → New Project → **Deploy from GitHub repo**
-2. Select `RecoverAI`
-3. Railway reads `railway.toml` automatically
-4. Add environment variables in the Railway dashboard:
-   - `RAZORPAY_WEBHOOK_SECRET`
-   - `OPENAI_API_KEY`
-   - `PORT` is injected automatically
-5. Click **Deploy**
-
----
-
-## Step 5 — Deploy on AWS (App Runner)
-
-### Prerequisites
 ```bash
-aws configure   # set your AWS credentials
+# In render.com dashboard: New Web Service → GitHub → RecoverAI
+# Build Command:  pip install -r requirements.txt
+# Start Command:  uvicorn recover_ai.main:app --host 0.0.0.0 --port $PORT
 ```
 
-### Push image to ECR
+---
+
+## Step 4 — Railway
+
+1. Go to **[railway.app](https://railway.app)** → New Project → **Deploy from GitHub**
+2. Select `RecoverAI`
+3. Railway reads `railway.toml` automatically
+4. Add environment variables:
+   - `RAZORPAY_WEBHOOK_SECRET`
+   - `OPENAI_API_KEY` (optional)
+5. Deploy
+
+---
+
+## Step 5 — AWS App Runner
+
+### Build and push Docker image to ECR
 
 ```bash
-# Create ECR repo
+# Create ECR repository
 aws ecr create-repository --repository-name recoverai --region us-east-1
 
-# Authenticate Docker to ECR
+# Authenticate
 aws ecr get-login-password --region us-east-1 \
   | docker login --username AWS --password-stdin \
     YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
@@ -178,97 +157,78 @@ docker push \
 
 ```bash
 aws secretsmanager create-secret \
-  --name recoverai/webhook-secret \
+  --name prod/recoverai/webhook-secret \
   --secret-string "your_webhook_secret"
-
-aws secretsmanager create-secret \
-  --name recoverai/openai-key \
-  --secret-string "your_openai_key"
 ```
 
-### Deploy via App Runner
+### Deploy App Runner
+
+Edit `aws/apprunner.yaml` to set your ECR image URI, then:
 
 ```bash
-# Update aws/apprunner.yaml with your ECR image URI, then:
 aws apprunner create-service \
   --cli-input-yaml file://aws/apprunner.yaml \
   --region us-east-1
 ```
 
-### Deploy Streamlit on AWS EC2 (alongside API)
+### Streamlit on EC2
 
 ```bash
-# SSH into your EC2 instance
-ssh -i your-key.pem ec2-user@YOUR_EC2_IP
-
-# Install dependencies
-sudo yum update -y
-sudo yum install python3-pip git -y
+# SSH into EC2 instance
 git clone https://github.com/YOUR_USERNAME/RecoverAI.git
 cd RecoverAI
 pip3 install -r requirements.txt
-
-# Run with systemd (see below) or tmux
 streamlit run streamlit_app.py \
-  --server.port 8501 \
-  --server.address 0.0.0.0 \
-  --server.headless true
+  --server.port 8501 --server.address 0.0.0.0 --server.headless true
 ```
 
-Open port 8501 in your EC2 Security Group inbound rules.
+Open port 8501 in EC2 Security Group inbound rules.
 
 ---
 
-## Step 6 — Deploy on Azure App Service
+## Step 6 — Azure App Service
 
 ### Prerequisites
+
 ```bash
 az login
 az group create --name RecoverAI --location eastus
 ```
 
-### Deploy via Bicep
+### Deploy via Bicep (IaC)
 
 ```bash
 az deployment group create \
   --resource-group RecoverAI \
   --template-file azure/webapp.bicep \
-  --parameters razorpayWebhookSecret="your_secret" openaiApiKey="your_key"
+  --parameters \
+    razorpayWebhookSecret="your_secret" \
+    openaiApiKey="your_key"
 ```
 
-### Or deploy directly via CLI (no Bicep)
+### Or deploy via CLI
 
 ```bash
-# Create App Service plan
 az appservice plan create \
-  --name recoverai-plan \
-  --resource-group RecoverAI \
-  --sku B1 \
-  --is-linux
+  --name recoverai-plan --resource-group RecoverAI \
+  --sku B1 --is-linux
 
-# Deploy FastAPI
+# FastAPI
 az webapp create \
-  --resource-group RecoverAI \
-  --plan recoverai-plan \
-  --name recoverai-api \
-  --runtime "PYTHON:3.11" \
+  --resource-group RecoverAI --plan recoverai-plan \
+  --name recoverai-api --runtime "PYTHON:3.11" \
   --startup-file "uvicorn recover_ai.main:app --host 0.0.0.0 --port 8000"
 
-# Deploy Streamlit
+# Streamlit
 az webapp create \
-  --resource-group RecoverAI \
-  --plan recoverai-plan \
-  --name recoverai-dashboard \
-  --runtime "PYTHON:3.11" \
+  --resource-group RecoverAI --plan recoverai-plan \
+  --name recoverai-dash --runtime "PYTHON:3.11" \
   --startup-file "streamlit run streamlit_app.py --server.port 8000 --server.address 0.0.0.0 --server.headless true"
 
 # Set secrets
 az webapp config appsettings set \
-  --resource-group RecoverAI \
-  --name recoverai-api \
-  --settings \
-    RAZORPAY_WEBHOOK_SECRET="your_secret" \
-    OPENAI_API_KEY="your_key"
+  --resource-group RecoverAI --name recoverai-api \
+  --settings RAZORPAY_WEBHOOK_SECRET="your_secret" OPENAI_API_KEY=""
 
 # Deploy code
 az webapp up --name recoverai-api --resource-group RecoverAI
@@ -276,72 +236,71 @@ az webapp up --name recoverai-api --resource-group RecoverAI
 
 ---
 
-## Step 7 — Docker / Self-Hosted (VPS, DigitalOcean, EC2)
+## Step 7 — Docker / Self-Hosted VPS
 
 ```bash
-# Clone repo on your server
 git clone https://github.com/YOUR_USERNAME/RecoverAI.git
 cd RecoverAI
-
-# Copy and fill in env vars
 cp .env.example .env
-nano .env   # set RAZORPAY_WEBHOOK_SECRET etc.
+# Edit .env — set RAZORPAY_WEBHOOK_SECRET
 
-# Build and start all services
+# Production (API + dashboard)
 docker compose up --build -d
 
-# With simulator for testing
+# Development (adds simulator)
 docker compose --profile dev up --build -d
 
-# View logs
-docker compose logs -f api
-docker compose logs -f dashboard
-
-# Stop
-docker compose down
+# Monitor
+docker compose logs -f
+docker compose ps
 ```
 
-Services will be available at:
-- API: `http://YOUR_SERVER_IP:8000`
-- Dashboard: `http://YOUR_SERVER_IP:8501`
+Services:
+- API: `http://YOUR_IP:8000`
+- Dashboard: `http://YOUR_IP:8501`
 
 ---
 
-## Environment Variables Reference
+## Platform Quick-Reference
 
-| Variable | Required | Description | Example |
-|---|---|---|---|
-| `RAZORPAY_WEBHOOK_SECRET` | **Yes** | HMAC signing secret | `whsec_abc123…` |
-| `OPENAI_API_KEY` | No | Enables LLM path; blank = rule engine | `sk-…` |
-| `DATABASE_PATH` | No | SQLite file path | `recover_ai.db` |
-| `LLM_MODEL` | No | OpenAI model name | `gpt-4o-mini` |
-| `LLM_TIMEOUT_SECONDS` | No | Hard timeout for LLM | `3.0` |
-| `MAX_RECOVERY_ATTEMPTS` | No | Business rule cap | `2` |
-| `WEBHOOK_BASE_URL` | No | Used by simulator | `http://127.0.0.1:8000` |
-| `SIMULATOR_INTERVAL_SECONDS` | No | Event frequency | `5.0` |
-| `DASHBOARD_REFRESH_SECONDS` | No | Auto-refresh rate | `5` |
+| Platform | API | Dashboard | Free | Best For |
+|----------|-----|-----------|------|----------|
+| Streamlit Cloud | ✗ | ✓ | ✓ | Dashboard hosting |
+| Render | ✓ | ✓ | ✓ (sleeps) | Full stack, quick |
+| Railway | ✓ | ✓ | ✓ ($5 credit) | Dev / staging |
+| AWS App Runner | ✓ | Via EC2 | ✗ | Production scale |
+| Azure App Service | ✓ | ✓ | ✗ (F1 free) | Enterprise / Azure |
+| Docker (VPS) | ✓ | ✓ | ✓ | Full control |
 
 ---
 
-## Platform Comparison
+## Recommended Buildathon Demo Setup (~15 min, zero cost)
 
-| Platform | FastAPI API | Streamlit Dashboard | Free Tier | Best For |
-|---|---|---|---|---|
-| **Streamlit Cloud** | ✗ | ✓ | ✓ | Dashboard hosting only |
-| **Render** | ✓ | ✓ | ✓ (sleeps) | Full stack, quick setup |
-| **Railway** | ✓ | ✓ | ✓ ($5 credit) | Dev / staging |
-| **AWS App Runner** | ✓ | Via EC2 | ✗ | Production scale |
-| **Azure App Service** | ✓ | ✓ | ✗ (F1 is free) | Enterprise / Azure shop |
-| **Docker (self-hosted)** | ✓ | ✓ | ✓ | Full control, any VPS |
+```
+1. git push → GitHub                  (2 min)
+2. Render Blueprint → API             (5 min, reads render.yaml automatically)
+3. Streamlit Cloud → Dashboard        (3 min, point to streamlit_app.py)
+4. Update WEBHOOK_BASE_URL secret     (1 min)
+5. python recover_ai/data_simulator.py --burst 30   (seeds dashboard with data)
+```
 
 ---
 
-## Recommended Setup for the Buildathon Demo
+## Testing the Webhook Manually
 
-1. **GitHub** — push code (takes 2 minutes)
-2. **Render** — deploy API (Blueprint auto-reads `render.yaml`)
-3. **Streamlit Cloud** — deploy dashboard (point to `streamlit_app.py`)
-4. Update `WEBHOOK_BASE_URL` in Streamlit secrets to the Render API URL
-5. Run `python recover_ai/data_simulator.py` locally to seed data
+```bash
+# On Linux/macOS:
+BODY='{"entity":"event","event":"payment.failed","payload":{"payment":{"entity":{"id":"pay_manual01","order_id":"order_manual01","amount":500000,"currency":"INR","error_code":"GATEWAY_ERROR","error_description":"Bank timeout"}}}}'
+SECRET="dev_secret_replace_in_production"
+SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
 
-Total setup time: ~15 minutes, zero cost.
+curl -X POST https://YOUR-API-URL/webhook/razorpay \
+  -H "Content-Type: application/json" \
+  -H "X-Razorpay-Signature: $SIG" \
+  -d "$BODY"
+```
+
+Expected:
+```json
+{"status":"ok","message":"Payment pay_manual01 queued for recovery analysis.","payment_id":"pay_manual01"}
+```

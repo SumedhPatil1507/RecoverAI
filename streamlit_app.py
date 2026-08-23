@@ -1,16 +1,16 @@
 """
-Streamlit Cloud entry point.
-Streamlit Cloud expects the app file at the REPO ROOT.
-This thin shim adds recover_ai/ to sys.path then delegates to app.py.
+Streamlit Cloud entry-point (repo root).
+Adds recover_ai/ to sys.path then runs app.py cleanly.
 """
 import sys
 import os
 
-# Make `import database`, `import config`, etc. resolve correctly
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "recover_ai"))
+_pkg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recover_ai")
+if _pkg not in sys.path:
+    sys.path.insert(0, _pkg)
 
-# Re-execute the actual dashboard module
-exec(
-    open(os.path.join(os.path.dirname(__file__), "recover_ai", "app.py")).read(),
-    {"__file__": os.path.join(os.path.dirname(__file__), "recover_ai", "app.py")},
+# Run the actual dashboard
+exec(                                                        # noqa: S102
+    open(os.path.join(_pkg, "app.py")).read(),
+    {"__file__": os.path.join(_pkg, "app.py")},
 )

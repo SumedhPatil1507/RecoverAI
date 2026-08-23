@@ -1,27 +1,29 @@
 """
-RecoverAI – FastAPI Webhook Ingestion Engine
-• POST /webhook/razorpay  – validates HMAC, parses payload, returns 200 in <50ms
-• GET  /health            – liveness probe
-• Background task handles all DB writes and AI processing asynchronously
+RecoverAI Enterprise – FastAPI Ingestion Gateway
 """
-
 from __future__ import annotations
+
+import os, sys
+_pkg = os.path.dirname(os.path.abspath(__file__))
+if _pkg not in sys.path: sys.path.insert(0, _pkg)
 
 import json
 import logging
 import time
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 import database as db
-from agent_engine import process_failed_transaction
+import queue_worker as qw
 from config import get_settings
-from schemas import HealthResponse, RazorpayWebhookEvent, WebhookAck
-from security import verify_razorpay_signature
+from schemas import (
+    HealthResponse,
+    PaymentFailurePayload,
+    WebhookAck,
+)
+from security import redact_pii, signature_required
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -29,10 +31,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# ── FastAPI App ───────────────────────────────────────────────────────────────
+# ── App ───────────────────────────────────────────────────────────────────────
+
 app = FastAPI(
-    title="RecoverAI",
-    description="Agentic Payment Degradation & Abandonment Engine",
+    title="RecoverAI Enterprise",
+    description="Agentic Payment Degradation & Revenue Recovery Engine",
     version=settings.app_version,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -41,30 +44,53 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 
 @app.on_event("startup")
-async def startup() -> None:
+async def _startup() -> None:
     db.init_db()
-    logger.info("RecoverAI API started – webhook endpoint ready")
+    await qw.start_workers(settings.queue_workers)
+    logger.info(
+        "RecoverAI Enterprise v%s started [env=%s] with %d workers",
+        settings.app_version, settings.environment, settings.queue_workers,
+    )
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    await qw.stop_workers()
+    logger.info("RecoverAI shutdown complete")
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health", response_model=HealthResponse, tags=["ops"])
-async def health_check() -> HealthResponse:
+async def health() -> HealthResponse:
     try:
         db.get_funnel_counts()
         db_ok = True
     except Exception:
         db_ok = False
-    return HealthResponse(version=settings.app_version, db_ok=db_ok)
+
+    try:
+        ledger_ok, _ = db.verify_audit_integrity()
+    except Exception:
+        ledger_ok = False
+
+    return HealthResponse(
+        status="healthy" if db_ok else "degraded",
+        version=settings.app_version,
+        environment=settings.environment,
+        db_ok=db_ok,
+        queue_depth=qw.get_queue().qsize(),
+        ledger_ok=ledger_ok,
+    )
 
 
-# ── Webhook ───────────────────────────────────────────────────────────────────
+# ── Webhook ingestion ─────────────────────────────────────────────────────────
 
 SUPPORTED_EVENTS = {"payment.failed"}
 
@@ -74,105 +100,124 @@ SUPPORTED_EVENTS = {"payment.failed"}
     response_model=WebhookAck,
     status_code=status.HTTP_200_OK,
     tags=["webhooks"],
-    summary="Ingest Razorpay payment failure webhooks",
+    summary="Ingest Razorpay payment failure webhook (< 30ms ACK SLA)",
 )
 async def razorpay_webhook(
-    background_tasks: BackgroundTasks,
-    raw_body: bytes = Depends(verify_razorpay_signature),
+    raw_body: bytes = Depends(signature_required),
 ) -> WebhookAck:
-    """
-    1. Signature already verified by the dependency.
-    2. Parse and validate the JSON body.
-    3. Enqueue background processing – respond immediately.
-    Target latency: < 50 ms before the background task starts.
-    """
     t0 = time.perf_counter()
 
-    # Parse JSON
+    # ── Parse ────────────────────────────────────────────────────────────
     try:
         body_dict = json.loads(raw_body)
     except json.JSONDecodeError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid JSON body: {exc}",
+            detail=f"Invalid JSON: {exc}",
         ) from exc
 
-    # Validate schema
+    # ── Schema validation ─────────────────────────────────────────────────
     try:
-        event = RazorpayWebhookEvent.model_validate(body_dict)
+        event = PaymentFailurePayload.model_validate(body_dict)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Schema validation failed: {exc}",
+            detail=f"Schema error: {exc}",
         ) from exc
 
-    # Filter to supported event types
     if event.event not in SUPPORTED_EVENTS:
-        logger.debug("Ignoring unsupported event type: %s", event.event)
-        return WebhookAck(message=f"Event '{event.event}' acknowledged but not processed.")
+        return WebhookAck(
+            message=f"Event '{event.event}' acknowledged but not processed.",
+            payment_id="N/A",
+        )
 
-    # Extract payment entity
+    # ── Extract & redact PII before any persistence ───────────────────────
     try:
         payment = event.payload.entity
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Could not extract payment entity: {exc}",
+            detail=f"Cannot extract payment entity: {exc}",
         ) from exc
 
-    # Offload all heavy work to a background task
-    background_tasks.add_task(
-        process_failed_transaction,
-        txn_id=payment.id,
+    # Redact PII
+    redacted_email = (
+        redact_pii({"email": payment.email})["email"]
+        if payment.email else None
+    )
+
+    # ── Enqueue (non-blocking) ─────────────────────────────────────────────
+    job = qw.PaymentJob(
         payment_id=payment.id,
         order_id=payment.order_id,
-        amount=payment.amount_in_rupees,
+        amount_paise=payment.amount,
         currency=payment.currency,
         failure_code=payment.error_code,
         failure_reason=payment.error_description or payment.error_reason,
+        email_redacted=redacted_email,
     )
+    accepted = await qw.enqueue(job)
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
     logger.info(
-        "Webhook acked in %.1f ms | event=%s | txn=%s | ₹%.2f",
-        elapsed_ms,
-        event.event,
-        payment.id,
-        payment.amount_in_rupees,
+        "Webhook ACK %.1f ms | event=%s | txn=%s | ₹%.2f | queued=%s",
+        elapsed_ms, event.event, payment.id, payment.amount_rupees, accepted,
     )
 
-    return WebhookAck(message=f"Payment {payment.id} queued for recovery analysis.")
+    if elapsed_ms > 30:
+        logger.warning("SLA BREACH: webhook ACK took %.1f ms (target <30ms)", elapsed_ms)
+
+    return WebhookAck(
+        message=f"Payment {payment.id} queued for recovery analysis.",
+        payment_id=payment.id,
+    )
 
 
-# ── Stats API (consumed by dashboard) ────────────────────────────────────────
+# ── Stats / Dashboard API ─────────────────────────────────────────────────────
 
 @app.get("/api/stats/funnel", tags=["stats"])
-async def get_funnel() -> dict:
+async def api_funnel() -> dict:
     return db.get_funnel_counts()
 
 
 @app.get("/api/stats/root-causes", tags=["stats"])
-async def get_root_causes() -> list:
+async def api_root_causes() -> list:
     return db.get_root_cause_breakdown()
 
 
 @app.get("/api/stats/timeseries", tags=["stats"])
-async def get_timeseries() -> list:
-    return db.get_timeseries_data()
+async def api_timeseries() -> list:
+    rows = db.get_timeseries_data()
+    # Convert Decimal → float for JSON serialisation
+    return [
+        {
+            "minute":            r["minute"],
+            "revenue_at_risk":   float(r["revenue_at_risk"]),
+            "revenue_recovered": float(r["revenue_recovered"]),
+        }
+        for r in rows
+    ]
 
 
 @app.get("/api/stats/summary", tags=["stats"])
-async def get_summary() -> dict:
-    return db.get_summary_metrics()
+async def api_summary() -> dict:
+    m = db.get_summary_metrics()
+    return {k: float(v) if hasattr(v, "__float__") else v for k, v in m.items()}
 
 
-@app.get("/api/audit-logs", tags=["stats"])
-async def get_audit_trail() -> list:
+@app.get("/api/audit/logs", tags=["audit"])
+async def api_audit_logs() -> list:
     rows = db.get_audit_logs(limit=200)
     return [dict(r) for r in rows]
 
 
+@app.get("/api/audit/verify", tags=["audit"])
+async def api_audit_verify() -> dict:
+    ok, msg = db.verify_audit_integrity()
+    return {"ok": ok, "message": msg}
+
+
 @app.get("/api/transactions", tags=["stats"])
-async def get_transactions() -> list:
+async def api_transactions() -> list:
     rows = db.get_all_transactions(limit=200)
     return [dict(r) for r in rows]
