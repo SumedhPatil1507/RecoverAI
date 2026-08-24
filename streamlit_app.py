@@ -1,16 +1,16 @@
 """
 RecoverAI Enterprise — Streamlit Cloud entry point.
 
-This file MUST live at the repo root.
-Streamlit Cloud points here: Main file path = streamlit_app.py
+MUST be at repo root. Set "Main file path" = streamlit_app.py in Streamlit Cloud.
 
-It adds recover_ai/ to sys.path so all flat imports (import database,
-import config, etc.) resolve correctly, then imports the dashboard module.
+Patches sys.path so all flat imports inside recover_ai/ resolve correctly,
+then delegates to recover_ai/app.py via exec (so Streamlit sees it as one
+continuous script and set_page_config is only called once).
 """
 import sys
 import os
 
-# ── Resolve recover_ai package path ──────────────────────────────────────────
+# ── Patch sys.path BEFORE any other import ───────────────────────────────────
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 _PKG  = os.path.join(_ROOT, "recover_ai")
 
@@ -18,19 +18,12 @@ for _p in (_PKG, _ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-# ── Bootstrap DB (no-op if already initialised) ───────────────────────────────
-import database as db
-db.init_db()
+# ── Set CWD to repo root so .env and relative paths resolve ──────────────────
+os.chdir(_ROOT)
 
-# ── Run the dashboard ─────────────────────────────────────────────────────────
-# Import app as a module — cleaner than exec(), works on all platforms
-import importlib.util, types
-
-_spec = importlib.util.spec_from_file_location(
-    "recover_ai_app",
-    os.path.join(_PKG, "app.py"),
-)
-_mod = importlib.util.module_from_spec(_spec)          # type: ignore[arg-type]
-_mod.__file__ = os.path.join(_PKG, "app.py")
-sys.modules["recover_ai_app"] = _mod
-_spec.loader.exec_module(_mod)                         # type: ignore[union-attr]
+# ── Execute app.py directly — exec preserves the patched sys.path ────────────
+# runpy.run_path() creates an isolated namespace that loses the path patch;
+# exec() shares the current globals so imports inside app.py work correctly.
+_app_path = os.path.join(_PKG, "app.py")
+with open(_app_path, encoding="utf-8") as _f:
+    exec(compile(_f.read(), _app_path, "exec"), {"__file__": _app_path, "__name__": "__main__"})  # noqa: S102

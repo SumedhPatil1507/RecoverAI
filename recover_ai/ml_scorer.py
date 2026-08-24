@@ -64,7 +64,7 @@ def _build_features(
 
 # ── Synthetic training data generator ────────────────────────────────────────
 
-def _generate_training_data(n: int = 5000) -> tuple[np.ndarray, np.ndarray]:
+def _generate_training_data(n: int = 2000) -> tuple[np.ndarray, np.ndarray]:
     """
     Generate synthetic but statistically plausible training data.
     Labels reflect real-world recovery rates by error category.
@@ -105,18 +105,18 @@ def _train_model() -> Any:
         from sklearn.calibration import CalibratedClassifierCV
 
         lgbm_model = lgb.LGBMClassifier(
-            n_estimators=200,
-            learning_rate=0.05,
-            num_leaves=31,
-            max_depth=6,
+            n_estimators=100,       # was 200 — halved for faster cold start
+            learning_rate=0.1,      # higher lr compensates for fewer trees
+            num_leaves=15,          # was 31
+            max_depth=4,            # was 6
             min_child_samples=20,
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=42,
             verbose=-1,
         )
-        # Calibrate probabilities via isotonic regression (Platt scaling)
-        calibrated = CalibratedClassifierCV(lgbm_model, cv=3, method="isotonic")
+        # cv=2 instead of cv=3: saves ~40% training time on cold start
+        calibrated = CalibratedClassifierCV(lgbm_model, cv=2, method="isotonic")
         calibrated.fit(X, y)
         logger.info("LightGBM + calibration trained successfully.")
         return calibrated
@@ -139,16 +139,21 @@ def _train_model() -> Any:
 # ── Scorer class ──────────────────────────────────────────────────────────────
 
 class MLRecoveryScorer:
-    """Thread-safe ML inference pipeline."""
+    """Thread-safe ML inference pipeline with lazy initialisation.
+    
+    The model is NOT trained at import time — only when score() is first called.
+    This keeps Streamlit startup fast; a spinner is shown in the UI instead.
+    """
 
-    _instance: MLRecoveryScorer | None = None
+    _instance: "MLRecoveryScorer | None" = None
     _lock = threading.Lock()
+    _init_lock = threading.Lock()
 
     def __init__(self) -> None:
         self._model: Any = None
-        self._load_or_train()
+        self._ready = False
 
-    # Singleton accessor
+    # Singleton accessor — does NOT train on construction
     @classmethod
     def get(cls) -> "MLRecoveryScorer":
         if cls._instance is None:
@@ -156,6 +161,14 @@ class MLRecoveryScorer:
                 if cls._instance is None:
                     cls._instance = cls()
         return cls._instance
+
+    def ensure_ready(self) -> None:
+        """Trigger lazy load/train (idempotent, thread-safe)."""
+        if not self._ready:
+            with self._init_lock:
+                if not self._ready:
+                    self._load_or_train()
+                    self._ready = True
 
     def _load_or_train(self) -> None:
         path = settings.ml_model_path
@@ -183,10 +196,8 @@ class MLRecoveryScorer:
         retry_count: int = 0,
         hour_of_day: int | None = None,
     ) -> float:
-        """
-        Returns recoverability_score ∈ [0.00, 1.00].
-        Thread-safe; never raises – returns 0.5 on any unexpected error.
-        """
+        """Returns recoverability_score ∈ [0.00, 1.00]. Never raises."""
+        self.ensure_ready()
         if hour_of_day is None:
             hour_of_day = datetime.utcnow().hour
         try:

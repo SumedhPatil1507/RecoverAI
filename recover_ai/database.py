@@ -3,9 +3,16 @@ RecoverAI Enterprise – Database Layer
 """
 from __future__ import annotations
 
-import os, sys
-_pkg = os.path.dirname(os.path.abspath(__file__))
-if _pkg not in sys.path: sys.path.insert(0, _pkg)
+import os
+import sys
+
+# ── Ensure recover_ai/ AND repo root are on sys.path ─────────────────────────
+# This makes `from config import get_settings` work regardless of CWD.
+_pkg  = os.path.dirname(os.path.abspath(__file__))
+_root = os.path.dirname(_pkg)
+for _p in (_pkg, _root):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import hashlib
 import json
@@ -25,13 +32,35 @@ settings = get_settings()
 _local = threading.local()
 
 
+# ── Writable DB path (Streamlit Cloud repo root is read-only) ─────────────────
+
+def _resolve_db_path() -> str:
+    """
+    Return a writable path for the SQLite database.
+    On Streamlit Cloud the repo root is mounted read-only, so fall back
+    to /tmp/ which is always writable.
+    """
+    path = settings.database_path
+    if os.path.isabs(path):
+        db_dir = os.path.dirname(path) or "/"
+        if os.access(db_dir, os.W_OK):
+            return path
+    else:
+        candidate = os.path.join(_root, path)
+        if os.access(os.path.dirname(candidate) or ".", os.W_OK):
+            return candidate
+    # Fallback: /tmp/ is always writable
+    return os.path.join("/tmp", os.path.basename(path))
+
+
 # ── Connection pool ───────────────────────────────────────────────────────────
 
 def _get_conn() -> sqlite3.Connection:
     conn = getattr(_local, "conn", None)
     if conn is None:
+        db_path = _resolve_db_path()
         conn = sqlite3.connect(
-            settings.database_path,
+            db_path,
             check_same_thread=False,
             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
         )
@@ -64,7 +93,7 @@ _DDL = """
 CREATE TABLE IF NOT EXISTS transactions (
     payment_id            TEXT PRIMARY KEY,
     order_id              TEXT NOT NULL,
-    amount_paise          INTEGER NOT NULL,        -- stored as integer paise
+    amount_paise          INTEGER NOT NULL,
     currency              TEXT NOT NULL DEFAULT 'INR',
     status                TEXT NOT NULL DEFAULT 'FAILED',
     failure_code          TEXT,
@@ -102,26 +131,21 @@ CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp);
 def init_db() -> None:
     with get_db() as conn:
         conn.executescript(_DDL)
-    logger.info("Database initialised at %s (WAL mode)", settings.database_path)
+    logger.info("Database initialised at %s (WAL mode)", _resolve_db_path())
 
 
 # ── Hash-chain ledger ─────────────────────────────────────────────────────────
 
 def compute_event_hash(previous_hash: str, current_data: dict[str, Any]) -> str:
-    """
-    SHA-256(previous_hash + canonical JSON of current_data).
-    Produces a deterministic digest linking each record to its predecessor.
-    """
     canonical = json.dumps(current_data, sort_keys=True, default=str)
     raw = f"{previous_hash}{canonical}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
-_audit_lock = threading.Lock()   # serialises all audit_log writes across threads
+_audit_lock = threading.Lock()
 
 
 def _get_latest_hash_locked(conn: sqlite3.Connection) -> str:
-    """Read latest hash inside an already-open connection (no new transaction)."""
     row = conn.execute(
         "SELECT current_hash FROM audit_logs ORDER BY log_id DESC LIMIT 1"
     ).fetchone()
@@ -129,10 +153,6 @@ def _get_latest_hash_locked(conn: sqlite3.Connection) -> str:
 
 
 def verify_audit_integrity() -> tuple[bool, str]:
-    """
-    Replay the entire hash chain.
-    Returns (True, "OK") if unbroken, (False, "<description>") if tampered.
-    """
     with get_db() as conn:
         rows = conn.execute(
             """
@@ -150,20 +170,19 @@ def verify_audit_integrity() -> tuple[bool, str]:
     running_hash = "GENESIS"
     for row in rows:
         data = {
-            "transaction_id":    row["transaction_id"],
-            "action_taken":      row["action_taken"],
-            "decision_rationale": row["decision_rationale"],
-            "source":            row["source"],
+            "transaction_id":       row["transaction_id"],
+            "action_taken":         row["action_taken"],
+            "decision_rationale":   row["decision_rationale"],
+            "source":               row["source"],
             "recoverability_score": row["recoverability_score"],
-            "timestamp":         row["timestamp"],
+            "timestamp":            row["timestamp"],
         }
-        expected_prev = running_hash
-        if row["previous_hash"] != expected_prev:
+        if row["previous_hash"] != running_hash:
             return (
                 False,
                 f"TAMPER DETECTED at log_id={row['log_id']}: "
                 f"previous_hash mismatch (stored='{row['previous_hash'][:16]}…' "
-                f"expected='{expected_prev[:16]}…')",
+                f"expected='{running_hash[:16]}…')",
             )
         recomputed = compute_event_hash(running_hash, data)
         if recomputed != row["current_hash"]:
@@ -264,23 +283,17 @@ def append_audit_log(
     source: str,
     recoverability_score: float,
 ) -> str:
-    """
-    Append one record to the hash chain atomically.
-    A module-level lock ensures no two threads can interleave the
-    read-last-hash → compute-new-hash → write step.
-    Returns the new current_hash.
-    """
     now = _utcnow()
     with _audit_lock:
         with get_db() as conn:
             prev_hash = _get_latest_hash_locked(conn)
             data = {
-                "transaction_id":     transaction_id,
-                "action_taken":       action_taken,
-                "decision_rationale": decision_rationale,
-                "source":             source,
+                "transaction_id":       transaction_id,
+                "action_taken":         action_taken,
+                "decision_rationale":   decision_rationale,
+                "source":               source,
                 "recoverability_score": recoverability_score,
-                "timestamp":          now,
+                "timestamp":            now,
             }
             new_hash = compute_event_hash(prev_hash, data)
             conn.execute(
@@ -383,9 +396,9 @@ def get_summary_metrics() -> dict[str, Any]:
 
     if not row or not row["total_txns"]:
         return {
-            "total_at_risk": Decimal(0),
-            "total_recovered": Decimal(0),
-            "recovery_rate": 0.0,
+            "total_at_risk":            Decimal(0),
+            "total_recovered":          Decimal(0),
+            "recovery_rate":            0.0,
             "avg_recoverability_score": 0.0,
         }
 
