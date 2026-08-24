@@ -14,8 +14,8 @@ import threading
 from datetime import datetime
 from typing import Any
 
-import numpy as np
-import pandas as pd
+# numpy is imported lazily inside _build_features and _generate_training_data
+# to avoid blocking Streamlit startup with heavy C-extension loading.
 
 from config import get_settings
 
@@ -51,8 +51,9 @@ def _build_features(
     error_code: str | None,
     hour_of_day: int,
     retry_count: int,
-) -> np.ndarray:
+) -> "np.ndarray":
     """Encode a single transaction into a feature vector."""
+    import numpy as np
     code_cat = ERROR_CODE_CATEGORIES.get(
         (error_code or "UNKNOWN").upper().replace(" ", "_"), 6
     )
@@ -64,11 +65,12 @@ def _build_features(
 
 # ── Synthetic training data generator ────────────────────────────────────────
 
-def _generate_training_data(n: int = 2000) -> tuple[np.ndarray, np.ndarray]:
+def _generate_training_data(n: int = 2000) -> "tuple[Any, Any]":
     """
     Generate synthetic but statistically plausible training data.
     Labels reflect real-world recovery rates by error category.
     """
+    import numpy as np
     rng = np.random.default_rng(42)
     amounts    = rng.uniform(500, 15_000, n).astype(np.float32)
     categories = rng.integers(0, 7, n)
@@ -98,7 +100,7 @@ def _generate_training_data(n: int = 2000) -> tuple[np.ndarray, np.ndarray]:
 def _train_model() -> Any:
     """Train LightGBM (or LogisticRegression fallback) and return the model."""
     logger.info("Training ML recoverability scorer on synthetic data…")
-    X, y = _generate_training_data(5000)
+    X, y = _generate_training_data(1000)  # 1k samples — fast enough on Cloud
 
     try:
         import lightgbm as lgb

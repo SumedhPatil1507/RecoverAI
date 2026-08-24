@@ -112,7 +112,7 @@ with st.sidebar:
     st.caption(f"v{_settings.app_version}  ·  {_settings.environment.upper()}")
     st.divider()
     auto_refresh = st.toggle("⟳ Auto Refresh", value=True, key="ar")
-    refresh_ms   = st.slider("Interval (s)", 2, 30, _settings.dashboard_refresh_seconds) * 1000
+    refresh_ms   = st.slider("Interval (s)", 5, 60, _settings.dashboard_refresh_seconds) * 1000
     st.divider()
     if st.button("🔄 Force Refresh", use_container_width=True):
         st.cache_data.clear()
@@ -126,21 +126,21 @@ with st.sidebar:
 if auto_refresh:
     st_autorefresh(interval=refresh_ms, key="dashboard_refresh")
 
-# ── Cached data loaders (TTL=3s for near-real-time feel) ─────────────────────
-@st.cache_data(ttl=3)
+# ── Cached data loaders (TTL=10s — balances freshness vs. DB overhead) ────────
+@st.cache_data(ttl=10)
 def _load_summary() -> dict:
     m = _db.get_summary_metrics()
     return {k: float(v) if isinstance(v, Decimal) else v for k, v in m.items()}
 
-@st.cache_data(ttl=3)
+@st.cache_data(ttl=10)
 def _load_funnel() -> dict:
     return _db.get_funnel_counts()
 
-@st.cache_data(ttl=3)
+@st.cache_data(ttl=10)
 def _load_root_causes() -> list:
     return _db.get_root_cause_breakdown()
 
-@st.cache_data(ttl=3)
+@st.cache_data(ttl=10)
 def _load_timeseries() -> pd.DataFrame:
     rows = _db.get_timeseries_data()
     if not rows:
@@ -153,12 +153,12 @@ def _load_timeseries() -> pd.DataFrame:
     df["minute"] = pd.to_datetime(df["minute"])
     return df.sort_values("minute").reset_index(drop=True)
 
-@st.cache_data(ttl=3)
+@st.cache_data(ttl=10)
 def _load_audit_logs() -> pd.DataFrame:
     rows = _db.get_audit_logs(200)
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
-@st.cache_data(ttl=3)
+@st.cache_data(ttl=10)
 def _load_transactions() -> pd.DataFrame:
     rows = _db.get_all_transactions(300)
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
@@ -191,10 +191,15 @@ total_recovered = summary.get("total_recovered", 0.0)
 recovery_rate   = summary.get("recovery_rate", 0.0)
 avg_score       = summary.get("avg_recoverability_score", 0.0)
 
-try:
-    _ledger_ok, _ledger_msg = _db.verify_audit_integrity()
-except Exception:
-    _ledger_ok, _ledger_msg = False, "Verification error"
+@st.cache_data(ttl=60)
+def _load_ledger_status() -> tuple[bool, str]:
+    """Cached ledger check — replays the hash chain at most once per 60 s."""
+    try:
+        return _db.verify_audit_integrity()
+    except Exception:
+        return False, "Verification error"
+
+_ledger_ok, _ledger_msg = _load_ledger_status()
 
 c1, c2, c3, c4, c5 = st.columns(5)
 _kpi(c1, "💰 Revenue at Risk",   f"₹{total_risk:,.0f}",      "All failed transactions")
@@ -378,7 +383,8 @@ st.markdown("#### 🔐 Cryptographic Audit Ledger Verification")
 
 if st.button("🔍 Verify Ledger Integrity Now", type="primary"):
     with st.spinner("Replaying SHA-256 hash chain…"):
-        ok, msg = _db.verify_audit_integrity()
+        _load_ledger_status.clear()
+        ok, msg = _load_ledger_status()
     if ok:
         st.markdown(
             '<div class="badge-ok" style="font-size:1rem;padding:.5rem 1.2rem">'
