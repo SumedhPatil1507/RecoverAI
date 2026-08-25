@@ -6,18 +6,24 @@ from __future__ import annotations
 
 import os
 import sys
+
+# ── Path resolution — MUST happen before any local imports ───────────────────
+# Works whether Streamlit runs this file directly (recover_ai/app.py) or via
+# streamlit_app.py at the repo root.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+for _p in (_HERE, _ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+os.chdir(_ROOT)
+
 from datetime import datetime
 from decimal import Decimal
 
+# Heavy UI imports — kept at module level (path is set above before these run)
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-
-# ── Path resolution (works from any CWD) ─────────────────────────────────────
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
 
 # ── Page config — MUST be the very first Streamlit call ──────────────────────
 st.set_page_config(
@@ -26,6 +32,10 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Plotly imported after set_page_config — by this point the Streamlit runtime
+# is fully initialised and all site-packages are on sys.path.
+import plotly.graph_objects as go  # noqa: E402
 
 # ── Lazy-init DB and settings (cached so it only runs once per session) ───────
 @st.cache_resource(show_spinner=False)
