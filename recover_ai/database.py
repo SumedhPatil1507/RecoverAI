@@ -38,7 +38,7 @@ def _resolve_db_path() -> str:
     """
     Return a writable path for the SQLite database.
     On Streamlit Cloud the repo root is mounted read-only, so fall back
-    to /tmp/ which is always writable.
+    to a temp directory which is always writable.
     """
     path = settings.database_path
     if os.path.isabs(path):
@@ -49,8 +49,10 @@ def _resolve_db_path() -> str:
         candidate = os.path.join(_root, path)
         if os.access(os.path.dirname(candidate) or ".", os.W_OK):
             return candidate
-    # Fallback: /tmp/ is always writable
-    return os.path.join("/tmp", os.path.basename(path))
+    # Fallback: use platform-appropriate temp directory
+    import tempfile
+    temp_dir = tempfile.gettempdir()
+    return os.path.join(temp_dir, os.path.basename(path))
 
 
 # ── Connection pool ───────────────────────────────────────────────────────────

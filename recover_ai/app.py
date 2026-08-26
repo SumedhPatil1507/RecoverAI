@@ -17,10 +17,10 @@ for _p in (_HERE, _ROOT):
         sys.path.insert(0, _p)
 os.chdir(_ROOT)
 
+import time
 from datetime import datetime
 from decimal import Decimal
 
-# Heavy UI imports — kept at module level (path is set above before these run)
 import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -122,7 +122,7 @@ with st.sidebar:
     st.caption(f"v{_settings.app_version}  ·  {_settings.environment.upper()}")
     st.divider()
     auto_refresh = st.toggle("⟳ Auto Refresh", value=True, key="ar")
-    refresh_ms   = st.slider("Interval (s)", 5, 60, _settings.dashboard_refresh_seconds) * 1000
+    refresh_s    = st.slider("Interval (s)", 5, 60, _settings.dashboard_refresh_seconds)
     st.divider()
     if st.button("🔄 Force Refresh", use_container_width=True):
         st.cache_data.clear()
@@ -132,10 +132,8 @@ with st.sidebar:
     st.caption(f"**ML threshold:** {_settings.ml_low_priority_threshold}")
     st.caption(f"**Max discount guardrail:** {_settings.max_discount_pct}%")
 
-# ── Auto-refresh ──────────────────────────────────────────────────────────────
-if auto_refresh:
-    st_autorefresh(interval=refresh_ms, key="dashboard_refresh")
-
+# ── Auto-refresh — time.sleep + st.rerun() (works on all Streamlit versions) ──
+# The full page renders first, then we sleep, then rerun. No third-party deps.
 # ── Cached data loaders (TTL=10s — balances freshness vs. DB overhead) ────────
 @st.cache_data(ttl=10)
 def _load_summary() -> dict:
