@@ -67,11 +67,14 @@ def _get_conn() -> sqlite3.Connection:
             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
         )
         conn.row_factory = sqlite3.Row
+        # Optimized PRAGMA settings for better performance
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute("PRAGMA cache_size=-65536;")   # 64 MB page cache
+        conn.execute("PRAGMA cache_size=-32768;")   # 32 MB page cache (reduced for faster startup)
         conn.execute("PRAGMA temp_store=MEMORY;")
+        conn.execute("PRAGMA mmap_size=268435456;") # 256MB memory-mapped I/O for faster reads
+        conn.execute("PRAGMA page_size=4096;")       # Optimal page size for most systems
         conn.commit()
         _local.conn = conn
         logger.debug("WAL connection opened on thread %d", threading.get_ident())

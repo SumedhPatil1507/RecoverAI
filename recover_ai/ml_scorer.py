@@ -100,28 +100,27 @@ def _generate_training_data(n: int = 2000) -> "tuple[Any, Any]":
 def _train_model() -> Any:
     """Train LightGBM (or LogisticRegression fallback) and return the model."""
     logger.info("Training ML recoverability scorer on synthetic data…")
-    X, y = _generate_training_data(1000)  # 1k samples — fast enough on Cloud
+    X, y = _generate_training_data(500)  # Reduced to 500 samples for faster training
 
     try:
         import lightgbm as lgb
         from sklearn.calibration import CalibratedClassifierCV
 
         lgbm_model = lgb.LGBMClassifier(
-            n_estimators=100,       # was 200 — halved for faster cold start
-            learning_rate=0.1,      # higher lr compensates for fewer trees
-            num_leaves=15,          # was 31
-            max_depth=4,            # was 6
-            min_child_samples=20,
+            n_estimators=50,        # Further reduced for faster startup
+            learning_rate=0.15,     # Higher lr to compensate for fewer trees
+            num_leaves=12,          # Reduced complexity
+            max_depth=3,            # Shallower trees
+            min_child_samples=15,
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=42,
             verbose=-1,
         )
-        # cv=2 instead of cv=3: saves ~40% training time on cold start
-        calibrated = CalibratedClassifierCV(lgbm_model, cv=2, method="isotonic")
-        calibrated.fit(X, y)
-        logger.info("LightGBM + calibration trained successfully.")
-        return calibrated
+        # No calibration for faster training - acceptable for demo purposes
+        lgbm_model.fit(X, y)
+        logger.info("LightGBM trained successfully (fast mode).")
+        return lgbm_model
 
     except ImportError:
         logger.warning("LightGBM not available; training LogisticRegression fallback.")
@@ -131,7 +130,7 @@ def _train_model() -> Any:
 
         model = Pipeline([
             ("scaler", StandardScaler()),
-            ("clf", LogisticRegression(max_iter=500, random_state=42)),
+            ("clf", LogisticRegression(max_iter=300, random_state=42)),
         ])
         model.fit(X, y)
         logger.info("Logistic regression fallback trained.")

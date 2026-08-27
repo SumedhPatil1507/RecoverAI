@@ -89,7 +89,7 @@ if _PYDANTIC_V2:
         max_transaction_amount_paise: int = 1_500_000  # ₹15,000
 
         # ── Dashboard ─────────────────────────────────────────────────────────
-        dashboard_refresh_seconds: int = 10
+        dashboard_refresh_seconds: int = 60
 
         @field_validator("environment", mode="before")
         @classmethod
@@ -123,7 +123,7 @@ else:
         webhook_base_url: str = "http://127.0.0.1:8000"
         min_transaction_amount_paise: int = 50_000
         max_transaction_amount_paise: int = 1_500_000
-        dashboard_refresh_seconds: int = 10
+        dashboard_refresh_seconds: int = 60
 
         @field_validator("environment", pre=True)
         @classmethod

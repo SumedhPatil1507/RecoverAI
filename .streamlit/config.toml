@@ -11,9 +11,20 @@ headless             = true   # required for all cloud deployments
 enableCORS           = true   # must be true when enableXsrfProtection = true
 enableXsrfProtection = true
 maxUploadSize        = 10
+# Session timeout settings to prevent sleep
+maxMessageSize      = 500   # Increased for better performance
+enableStaticServing = false # Disabled since we don't have static files
 
 [browser]
 gatherUsageStats = false
+serverAddress      = "localhost"
+serverPort         = 8501
 
 [runner]
 fastReruns = true
+# Magic commands and script runner settings
+magicEnabled = true
+
+[client]
+showErrorDetails = true
+toolbarMode = "minimal"  # Minimal toolbar for cleaner UI

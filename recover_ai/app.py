@@ -121,9 +121,12 @@ with st.sidebar:
     st.markdown("## 🏦 RecoverAI Enterprise")
     st.caption(f"v{_settings.app_version}  ·  {_settings.environment.upper()}")
     st.divider()
-    auto_refresh = st.toggle("⟳ Auto Refresh", value=True, key="ar")
-    refresh_s    = st.slider("Interval (s)", 5, 60, _settings.dashboard_refresh_seconds)
+    auto_refresh = st.toggle("⟳ Auto Refresh", value=False, key="ar")
+    refresh_s    = st.slider("Interval (s)", 30, 300, _settings.dashboard_refresh_seconds)
     st.divider()
+    # Trigger automatic page refresh if enabled - use longer intervals to reduce load
+    if auto_refresh:
+        st_autorefresh(interval=refresh_s * 1000, limit=None, key="auto_refresh")
     if st.button("🔄 Force Refresh", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -134,21 +137,21 @@ with st.sidebar:
 
 # ── Auto-refresh — time.sleep + st.rerun() (works on all Streamlit versions) ──
 # The full page renders first, then we sleep, then rerun. No third-party deps.
-# ── Cached data loaders (TTL=10s — balances freshness vs. DB overhead) ────────
-@st.cache_data(ttl=10)
+# ── Cached data loaders (TTL=60s — reduces DB queries for better performance) ────────
+@st.cache_data(ttl=60)
 def _load_summary() -> dict:
     m = _db.get_summary_metrics()
     return {k: float(v) if isinstance(v, Decimal) else v for k, v in m.items()}
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=60)
 def _load_funnel() -> dict:
     return _db.get_funnel_counts()
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=60)
 def _load_root_causes() -> list:
     return _db.get_root_cause_breakdown()
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=60)
 def _load_timeseries() -> pd.DataFrame:
     rows = _db.get_timeseries_data()
     if not rows:
@@ -161,14 +164,14 @@ def _load_timeseries() -> pd.DataFrame:
     df["minute"] = pd.to_datetime(df["minute"])
     return df.sort_values("minute").reset_index(drop=True)
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=120)
 def _load_audit_logs() -> pd.DataFrame:
-    rows = _db.get_audit_logs(200)
+    rows = _db.get_audit_logs(100)  # Reduced from 200 for faster loading
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=120)
 def _load_transactions() -> pd.DataFrame:
-    rows = _db.get_all_transactions(300)
+    rows = _db.get_all_transactions(100)  # Reduced from 300 for faster loading
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
 # ── KPI helper ────────────────────────────────────────────────────────────────
@@ -199,9 +202,9 @@ total_recovered = summary.get("total_recovered", 0.0)
 recovery_rate   = summary.get("recovery_rate", 0.0)
 avg_score       = summary.get("avg_recoverability_score", 0.0)
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def _load_ledger_status() -> tuple[bool, str]:
-    """Cached ledger check — replays the hash chain at most once per 60 s."""
+    """Cached ledger check — replays the hash chain at most once per 5 min."""
     try:
         return _db.verify_audit_integrity()
     except Exception:
@@ -458,3 +461,8 @@ st.caption(
     "RecoverAI Enterprise v2.0.0 · Razorpay AI Buildathon Track 03 · "
     "FastAPI · SQLite WAL · LightGBM · SHA-256 Ledger · Streamlit · Plotly WebGL"
 )
+
+# ── Keep-Alive Mechanism ────────────────────────────────────────────────────────
+# Always run background keep-alive to prevent session timeout (every 4 minutes)
+# This ensures the app stays alive even during extended inactivity periods
+st_autorefresh(interval=240000, limit=None, key="keep_alive")
