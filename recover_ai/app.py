@@ -463,6 +463,7 @@ st.caption(
 )
 
 # ── Keep-Alive Mechanism ────────────────────────────────────────────────────────
-# Always run background keep-alive to prevent session timeout (every 4 minutes)
-# This ensures the app stays alive even during extended inactivity periods
+# Background keep-alive to prevent session timeout (every 4 minutes)
+# This ensures the app stays alive during extended inactivity periods
+# Uses a separate key to avoid conflicts with user-controlled auto-refresh
 st_autorefresh(interval=240000, limit=None, key="keep_alive")
