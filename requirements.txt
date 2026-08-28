@@ -8,17 +8,17 @@ pydantic-settings==2.6.1
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 streamlit==1.45.1
+streamlit-autorefresh==1.0.1
 plotly==5.24.1
-pandas==2.2.3
-streamlit-autorefresh==0.1.2
+pandas>=2.2.0
 
 # ── Pillow: >=11.0.0 required for Python 3.12+ pre-built wheels ──────────────
-Pillow==11.2.1
+Pillow>=11.0.0
 
 # ── ML Pipeline ───────────────────────────────────────────────────────────────
-scikit-learn==1.6.1
-lightgbm==4.5.0
-numpy==1.26.4
+scikit-learn>=1.5.0
+lightgbm>=4.0.0
+numpy>=1.24.0
 
 # ── Resilience ────────────────────────────────────────────────────────────────
-tenacity==9.0.0
+tenacity>=8.0.0
