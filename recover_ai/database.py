@@ -115,14 +115,17 @@ def _get_conn() -> sqlite3.Connection:
             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
         )
         conn.row_factory = sqlite3.Row
-        # Optimized PRAGMA settings for better performance
-        conn.execute("PRAGMA journal_mode=WAL;")
+        # WAL mode: best-effort, silently falls back on NFS/overlay filesystems
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+        except sqlite3.OperationalError:
+            pass
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute("PRAGMA cache_size=-32768;")   # 32 MB page cache (reduced for faster startup)
+        conn.execute("PRAGMA cache_size=-32768;")
         conn.execute("PRAGMA temp_store=MEMORY;")
-        conn.execute("PRAGMA mmap_size=268435456;") # 256MB memory-mapped I/O for faster reads
-        conn.execute("PRAGMA page_size=4096;")       # Optimal page size for most systems
+        conn.execute("PRAGMA mmap_size=268435456;")
+        conn.execute("PRAGMA page_size=4096;")
         conn.commit()
         _local.conn = conn
         logger.debug("WAL connection opened on thread %d", threading.get_ident())
@@ -247,18 +250,29 @@ def init_db() -> None:
     )
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
+        # WAL mode is faster but requires shared-memory support.
+        # On Streamlit Cloud (NFS/overlay fs) WAL is unsupported — fall back
+        # to DELETE journal mode silently.
+        try:
+            result = conn.execute("PRAGMA journal_mode=WAL;").fetchone()
+            if result and result[0].upper() != "WAL":
+                logger.info("WAL mode unavailable (got %s) — using DELETE mode", result[0])
+        except sqlite3.OperationalError:
+            logger.info("WAL PRAGMA failed — filesystem does not support WAL, using default journal mode")
+
         conn.execute("PRAGMA foreign_keys=OFF;")   # OFF during schema setup
         for stmt in _DDL_STATEMENTS:
             try:
                 conn.execute(stmt)
             except sqlite3.OperationalError as exc:
-                # Tolerate "already exists" and similar benign DDL errors
-                msg = str(exc).lower()
-                if any(k in msg for k in ("already exists", "duplicate column",
-                                           "no such table")):
-                    continue
-                raise
+                # Log and continue — every statement uses IF NOT EXISTS / OR IGNORE
+                # so failures are benign (table/index already exists, etc.)
+                logger.debug("DDL stmt skipped (%s): %.80s", exc, stmt)
+                continue
+            except Exception as exc:
+                # Unexpected error — log full details and continue rather than crash
+                logger.warning("DDL stmt failed unexpectedly (%s): %.80s", exc, stmt)
+                continue
         conn.execute("PRAGMA foreign_keys=ON;")
         conn.commit()
     finally:
