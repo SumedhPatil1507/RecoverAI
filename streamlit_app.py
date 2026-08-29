@@ -38,6 +38,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from anomaly_detection import detect as detect_anomalies, forecast as forecast_anomalies
+from explainability import beeswarm_figure, export_pdf, explain_transaction, feature_importance, waterfall_figure
+from experimentation import choose_strategy, record as record_experiment, report as experiment_report
+from merchant_copilot import answer as copilot_answer, stream_text, suggested_questions
+from recovery_optimization import recommend as optimize_recovery, simulate as simulate_optimization
+
 # ── Page config — first Streamlit call ───────────────────────────────────────
 st.set_page_config(
     page_title="RecoverAI Enterprise",
@@ -233,14 +239,10 @@ for _k, _v in {
 # ══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📊 Intelligence Hub",
-    "🔗 Payment Links",
-    "📨 Dispatch",
-    "👤 HITL Approvals",
-    "🧪 A/B Testing",
-    "💥 Chaos Simulator",
-    "🏢 Merchants",
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+    "📊 Intelligence Hub", "🔗 Payment Links", "📨 Dispatch", "👤 HITL Approvals",
+    "🧪 A/B Testing", "💥 Chaos Simulator", "🏢 Merchants", "🧠 Merchant Copilot",
+    "🔍 Explainable AI", "🎯 Recovery Optimizer", "🧪 Experiment Agent", "🚨 Anomaly Agent",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -982,3 +984,145 @@ with tab7:
                                else "200 req/min" if v["plan"] == "Growth" else "50 req/min"}
                 for mid, v in merchants.items()
             ]), use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 8 — MERCHANT COPILOT
+# ══════════════════════════════════════════════════════════════════════════════
+with tab8:
+    st.markdown("## 🧠 Merchant Copilot")
+    st.caption("Ask questions over transactions, audit logs, recovery actions, and financial metrics.")
+    if "copilot_messages" not in st.session_state:
+        st.session_state.copilot_messages = []
+    st.markdown("#### Suggested questions")
+    qcols = st.columns(4)
+    for idx, question in enumerate(suggested_questions()):
+        if qcols[idx].button(question, key=f"copilot_suggestion_{idx}", use_container_width=True):
+            st.session_state.copilot_pending = question
+    prompt = st.chat_input("Ask about revenue at risk, recovery rate, root causes, or audit actions")
+    prompt = prompt or st.session_state.pop("copilot_pending", None)
+    for message in st.session_state.copilot_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if message.get("sql"):
+                with st.expander("Validated SQL and evidence"):
+                    st.code(message["sql"], language="sql")
+                    if message.get("rows"):
+                        st.dataframe(pd.DataFrame(message["rows"]), use_container_width=True)
+    if prompt:
+        st.session_state.copilot_messages.append({"role": "user", "content": prompt})
+        result = copilot_answer(prompt)
+        with st.chat_message("assistant"):
+            response_box = st.empty()
+            accumulated = ""
+            for chunk in stream_text(result["answer"]):
+                accumulated += chunk
+                response_box.markdown(accumulated + "▌")
+            response_box.markdown(accumulated)
+            with st.expander("Validated SQL and evidence"):
+                st.code(result["sql"], language="sql")
+                if result["rows"]:
+                    st.dataframe(pd.DataFrame(result["rows"]), use_container_width=True)
+        st.session_state.copilot_messages.append({"role": "assistant", "content": accumulated, "sql": result["sql"], "rows": result["rows"]})
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 9 — EXPLAINABLE AI
+# ══════════════════════════════════════════════════════════════════════════════
+with tab9:
+    st.markdown("## 🔍 Explainable AI")
+    explain_rows = [dict(row) for row in _db.get_all_transactions(500)]
+    if not explain_rows:
+        st.info("No scored transactions are available for explanation yet.")
+    else:
+        ids = [row["payment_id"] for row in explain_rows]
+        selected_id = st.selectbox("Transaction to explain", ids)
+        selected = next(row for row in explain_rows if row["payment_id"] == selected_id)
+        explanation = explain_transaction(selected)
+        e1, e2, e3 = st.columns(3)
+        e1.metric("Recovery score", f"{explanation['score']:.3f}")
+        e2.metric("Recommended action", explanation["action"])
+        e3.metric("Root cause", selected.get("failure_category") or "UNKNOWN")
+        st.info(explanation["action_reason"])
+        st.pyplot(waterfall_figure(explanation), clear_figure=True)
+        pdf = export_pdf(explanation)
+        st.download_button("Download transaction explanation PDF", pdf, file_name=f"recoverai_{selected_id}_explanation.pdf", mime="application/pdf")
+        st.markdown("#### Feature importance across transactions")
+        imp = feature_importance(explain_rows)
+        st.bar_chart(imp.set_index("feature"), use_container_width=True)
+        st.markdown("#### SHAP-style beeswarm")
+        st.pyplot(beeswarm_figure(explain_rows), clear_figure=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 10 — RECOVERY OPTIMIZATION AGENT
+# ══════════════════════════════════════════════════════════════════════════════
+with tab10:
+    st.markdown("## 🎯 Recovery Optimization Agent")
+    opt_rows = [dict(row) for row in _db.get_all_transactions(200)]
+    if opt_rows:
+        opt_id = st.selectbox("Failure event", [row["payment_id"] for row in opt_rows], key="optimizer_txn")
+        opt_event = next(row for row in opt_rows if row["payment_id"] == opt_id)
+        rec = optimize_recovery(opt_event)
+        st.json(rec)
+        st.caption("The recommendation combines contextual Thompson Sampling for payment methods with Bayesian-style posterior search over retry timing windows.")
+        if st.button("Run simulation", key="run_optimizer_simulation"):
+            st.session_state.optimizer_sim = simulate_optimization(opt_rows, rounds=250)
+        if st.session_state.get("optimizer_sim"):
+            st.dataframe(pd.DataFrame(st.session_state.optimizer_sim["arms"]).T, use_container_width=True)
+            st.metric("Simulated expected recovery rate", f"{st.session_state.optimizer_sim['recovery_rate']:.1%}")
+            st.metric("Simulated recovered revenue", f"₹{st.session_state.optimizer_sim['revenue_recovered']:,.2f}")
+    else:
+        st.info("Waiting for payment failure events.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 11 — EXPERIMENTATION AGENT
+# ══════════════════════════════════════════════════════════════════════════════
+with tab11:
+    st.markdown("## 🧪 Experimentation Agent")
+    st.caption("Online A/B and multi-armed-bandit strategy comparison.")
+    ec1, ec2, ec3, ec4 = st.columns(4)
+    strategy = ec1.selectbox("Strategy", ["retry_now", "retry_15m", "offer_upi", "offer_emi"])
+    recovered = ec2.checkbox("Recovered", value=True)
+    friction = ec3.number_input("Customer friction", min_value=0.0, max_value=10.0, value=1.0)
+    time_to_recovery = ec4.number_input("Time to recovery (min)", min_value=0.0, value=15.0)
+    revenue = st.number_input("Recovered revenue (₹)", min_value=0.0, value=1000.0)
+    if st.button("Record experiment outcome"):
+        record_experiment(strategy, recovered, revenue, friction, time_to_recovery)
+        st.success("Outcome recorded.")
+    report = experiment_report()
+    if report["strategies"]:
+        exp_df = pd.DataFrame(report["strategies"])
+        st.dataframe(exp_df, use_container_width=True)
+        st.bar_chart(exp_df.set_index("strategy")["recovery_rate"], use_container_width=True)
+        st.caption("Confidence intervals use a 95% normal approximation; treat early samples as directional rather than conclusive.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 12 — REVENUE ANOMALY DETECTION AGENT
+# ══════════════════════════════════════════════════════════════════════════════
+with tab12:
+    st.markdown("## 🚨 Revenue Anomaly Detection Agent")
+    anomaly_rows = [dict(row) for row in _db.get_all_transactions(1000)]
+    anomaly_result = detect_anomalies(anomaly_rows)
+    if anomaly_result["anomalies"]:
+        st.error(f"Detected {len(anomaly_result['anomalies'])} payment-failure anomaly window(s).")
+        st.dataframe(pd.DataFrame(anomaly_result["anomalies"]), use_container_width=True)
+        alert_text = f"RecoverAI anomaly alert: {len(anomaly_result['anomalies'])} payment-failure anomaly window(s) detected."
+        ac1, ac2 = st.columns(2)
+        with ac1:
+            if st.button("Send Slack alert", key="send_slack_alert"):
+                from anomaly_detection import send_slack_alert
+                st.success("Slack alert sent." if send_slack_alert(alert_text) else "Slack alert not sent; configure SLACK_WEBHOOK_URL.")
+        with ac2:
+            if st.button("Send email alert", key="send_email_alert"):
+                from anomaly_detection import send_email_alert
+                try:
+                    sent = send_email_alert("RecoverAI revenue anomaly", alert_text)
+                    st.success("Email alert sent." if sent else "Email alert not sent; configure SMTP_HOST and ALERT_EMAIL_TO.")
+                except Exception as exc:
+                    st.error(f"Email delivery failed: {exc}")
+    else:
+        st.success("No current anomaly detected.")
+    st.markdown("#### Forecasted failure volume")
+    forecast_df = forecast_anomalies(anomaly_rows)
+    if not forecast_df.empty:
+        st.line_chart(forecast_df.set_index("timestamp"), use_container_width=True)
+    st.caption("Detection combines Isolation Forest when enough observations exist, rolling statistical thresholding, and Prophet when installed.")

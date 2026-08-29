@@ -401,6 +401,48 @@ After 2 attempts → status: `EXPIRED`.
 | `MAX_DISCOUNT_PCT` | `15.0` | LLM guardrail cap (discount > 15% rejected) |
 | `SIMULATOR_INTERVAL_SECONDS` | `5.0` | Seconds between simulator events |
 | `DASHBOARD_REFRESH_SECONDS` | `5` | Auto-refresh interval |
+| `COPILOT_MODEL` | `gpt-4o-mini` | Merchant Copilot model |
+| `SLACK_WEBHOOK_URL` | _(empty)_ | Optional anomaly-alert webhook |
+| `SMTP_HOST` / `ALERT_EMAIL_TO` | _(empty)_ | Optional email anomaly alerts |
+| `DATABASE_URL` | _(empty)_ | Reserved for PostgreSQL deployment configuration |
+
+---
+
+## 🧩 AI Agent Modules
+
+RecoverAI now exposes five integrated modules through FastAPI and the Streamlit dashboard. The Merchant Copilot uses local retrieval over transaction and audit records, generates read-only SQL, validates it against an allowlist, and explains the returned financial metrics. When `OPENAI_API_KEY` is configured, it can use the configured Copilot model; without a key, deterministic query templates keep the dashboard functional. LangGraph makes the retrieval → query → validation workflow inspectable [12].
+
+The Explainable AI module provides per-transaction additive explanations, feature-importance views, SHAP waterfall and beeswarm plots when SHAP is available, and downloadable PDF reports. SHAP's documentation describes waterfall plots for individual predictions and beeswarm plots as dense summaries of feature impact [13] [14]. The Recovery Optimization Agent recommends a retry window, retry count, payment method, expected success probability, and expected recovered revenue using contextual Thompson Sampling over method and timing arms. The bandit calculations are implemented in this repository; the model outputs are estimates for decision support, not guarantees. Its simulation reports recovery rate, recovered revenue, and average regret.
+
+The Experimentation Agent supports online strategy allocation with multi-armed-bandit sampling. It tracks recovered revenue, recovery rate, customer friction, time to recovery, revenue lift against a baseline, and 95% confidence intervals. The Revenue Anomaly Detection Agent combines Isolation Forest when enough observations exist with rolling statistical thresholding; Prophet is optional and is used when installed for forecasting [15] [16]. It estimates affected value and can send Slack or SMTP email alerts when credentials are configured.
+
+### Streamlit modules
+
+| Tab | Purpose |
+|---|---|
+| **Merchant Copilot** | Streaming chat, suggested questions, RAG evidence, validated SQL, and financial explanations. |
+| **Explainable AI** | SHAP waterfall, SHAP beeswarm, feature importance, per-transaction action explanations, and PDF export. |
+| **Recovery Optimizer** | Event-level recommendation and contextual-bandit simulation. |
+| **Experiment Agent** | Strategy outcome recording, bandit report, lift, confidence intervals, friction, and time to recovery. |
+| **Anomaly Agent** | Real-time scan, anomaly windows, merchant impact, forecast, and Slack/email alert controls. |
+
+### AI API routes
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/copilot/query` | RAG-backed natural-language analytics with validated SQL. |
+| `POST` | `/api/copilot/stream` | Server-Sent Events stream for Copilot responses. |
+| `GET` | `/api/explain/{payment_id}` | Per-transaction explanation and recommended-action rationale. |
+| `GET` | `/api/explain/{payment_id}/pdf` | Download an explanation PDF. |
+| `POST` | `/api/recovery/optimize` | Return optimal retry strategy and expected economics. |
+| `POST` | `/api/recovery/simulate` | Evaluate optimization performance over simulated rounds. |
+| `GET` | `/api/experiments/report` | Return strategy metrics and confidence intervals. |
+| `POST` | `/api/experiments/outcome` | Record an online experiment outcome. |
+| `POST` | `/api/anomalies/scan` | Scan supplied or stored transactions for anomalies. |
+
+### Production data and alert configuration
+
+For a local demo, SQLite remains the default because it is easy to run as a single file. For multi-instance production, use the existing database boundary as the migration point for a PostgreSQL adapter, run migrations before deployment, and keep webhook/API workers stateless. Configure `SLACK_WEBHOOK_URL` for Slack alerts, or configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_TLS`, `ALERT_EMAIL_FROM`, and `ALERT_EMAIL_TO` for email delivery. Secrets must be supplied through the hosting platform's secret manager rather than committed to Git.
 
 ---
 
@@ -433,6 +475,12 @@ scikit-learn==1.5.2       ML calibration wrapper
 lightgbm==4.5.0           Gradient boosting classifier
 numpy==1.26.4             Numerical computing
 tenacity==9.0.0           Retry / exponential backoff
+openai>=1.50.0            Merchant Copilot and LLM integration
+langgraph>=0.2.0         Inspectable agent orchestration
+shap>=0.45.0             SHAP explanations and plots
+matplotlib>=3.8.0        Explainability rendering
+reportlab>=4.0.0         PDF explanation export
+psycopg[binary]>=3.2.0   Optional PostgreSQL driver
 ```
 
 ---
@@ -522,5 +570,10 @@ The following sources support the README's externally verifiable statements abou
 | [9] | [Plotly — Python Graphing Library](https://plotly.com/python/) | Plotly's Python charting and interactive visualization capabilities. |
 | [10] | [LightGBM documentation](https://lightgbm.readthedocs.io/en/latest/) | LightGBM model library used by the recoverability scorer. |
 | [11] | [scikit-learn documentation](https://scikit-learn.org/stable/) | Machine-learning utilities used alongside the scoring pipeline where applicable. |
+| [12] | [LangGraph — StateGraph reference](https://reference.langchain.com/python/langgraph/graph/state/StateGraph) | LangGraph `StateGraph` nodes communicate through shared state and compile into an executable graph. |
+| [13] | [SHAP — Waterfall plot documentation](https://shap.readthedocs.io/en/latest/example_notebooks/api_examples/plots/waterfall.html) | Waterfall plots explain a single prediction using an additive explanation object. |
+| [14] | [SHAP — Beeswarm plot documentation](https://shap.readthedocs.io/en/latest/example_notebooks/api_examples/plots/beeswarm.html) | Beeswarm plots summarize how features affect model outputs across a dataset. |
+| [15] | [scikit-learn — IsolationForest API](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html) | Isolation Forest is the anomaly-detection estimator used by the anomaly service when enough observations exist. |
+| [16] | [Prophet documentation](https://facebook.github.io/prophet/) | Optional time-series forecasting implementation used by the anomaly service when installed. |
 
 *RecoverAI Enterprise v2.0.0 · Razorpay AI Buildathon Track 03*
