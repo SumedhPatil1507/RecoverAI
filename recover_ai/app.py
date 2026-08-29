@@ -23,7 +23,6 @@ from decimal import Decimal
 
 import pandas as pd
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
 # ── Page config — MUST be the very first Streamlit call ──────────────────────
 st.set_page_config(
@@ -121,12 +120,6 @@ with st.sidebar:
     st.markdown("## 🏦 RecoverAI Enterprise")
     st.caption(f"v{_settings.app_version}  ·  {_settings.environment.upper()}")
     st.divider()
-    auto_refresh = st.toggle("⟳ Auto Refresh", value=False, key="ar")
-    refresh_s    = st.slider("Interval (s)", 30, 300, _settings.dashboard_refresh_seconds)
-    st.divider()
-    # Trigger automatic page refresh if enabled - use longer intervals to reduce load
-    if auto_refresh:
-        st_autorefresh(interval=refresh_s * 1000, limit=None, key="auto_refresh")
     if st.button("🔄 Force Refresh", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -461,9 +454,3 @@ st.caption(
     "RecoverAI Enterprise v2.0.0 · Razorpay AI Buildathon Track 03 · "
     "FastAPI · SQLite WAL · LightGBM · SHA-256 Ledger · Streamlit · Plotly WebGL"
 )
-
-# ── Keep-Alive Mechanism ────────────────────────────────────────────────────────
-# Background keep-alive to prevent session timeout (every 4 minutes)
-# This ensures the app stays alive during extended inactivity periods
-# Uses a separate key to avoid conflicts with user-controlled auto-refresh
-st_autorefresh(interval=240000, limit=None, key="keep_alive")
