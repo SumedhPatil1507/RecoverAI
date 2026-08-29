@@ -218,25 +218,74 @@ INSERT OR IGNORE INTO ab_experiment(arm, updated_at) VALUES ('control', datetime
 INSERT OR IGNORE INTO ab_experiment(arm, updated_at) VALUES ('variant', datetime('now'));
 """
 
+# Split DDL into individual statements for safe execution
+# (executescript() issues an implicit COMMIT which conflicts with our
+#  context-manager transaction on Python 3.14's stricter SQLite bindings)
+_DDL_STATEMENTS = [
+    stmt.strip()
+    for stmt in _DDL.split(";")
+    if stmt.strip() and not stmt.strip().startswith("--")
+]
+
 
 def init_db() -> None:
-    with get_db() as conn:
-        conn.executescript(_DDL)
-        # Live-migration: add new columns to existing databases without data loss
-        _migrate_add_column(conn, "transactions",  "merchant_id",    "TEXT NOT NULL DEFAULT 'default'")
-        _migrate_add_column(conn, "audit_logs",    "hmac_signature", "TEXT NOT NULL DEFAULT ''")
-        _migrate_add_column(conn, "audit_logs",    "merchant_id",    "TEXT NOT NULL DEFAULT 'default'")
-    logger.info("Database initialised at %s (WAL mode)", _resolve_db_path())
+    """
+    Initialise the database schema safely on all Python / SQLite versions.
+
+    Uses individual conn.execute() calls instead of executescript() to avoid
+    the implicit COMMIT that executescript issues — which raises
+    sqlite3.OperationalError on Python 3.14's stricter SQLite bindings when
+    called inside an existing transaction context.
+    """
+    db_path = _resolve_db_path()
+    # Use a fresh direct connection (not the thread-local pool) so we can
+    # run DDL outside of the application transaction context manager.
+    conn = sqlite3.connect(
+        db_path,
+        check_same_thread=False,
+        detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+    )
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA foreign_keys=OFF;")   # OFF during schema setup
+        for stmt in _DDL_STATEMENTS:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError as exc:
+                # Tolerate "already exists" and similar benign DDL errors
+                msg = str(exc).lower()
+                if any(k in msg for k in ("already exists", "duplicate column",
+                                           "no such table")):
+                    continue
+                raise
+        conn.execute("PRAGMA foreign_keys=ON;")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Live-migration: add columns introduced after initial schema creation
+    # Uses a separate connection to stay outside the pool transaction.
+    mig_conn = sqlite3.connect(db_path, check_same_thread=False)
+    try:
+        _migrate_add_column(mig_conn, "transactions",  "merchant_id",    "TEXT NOT NULL DEFAULT 'default'")
+        _migrate_add_column(mig_conn, "audit_logs",    "hmac_signature", "TEXT NOT NULL DEFAULT ''")
+        _migrate_add_column(mig_conn, "audit_logs",    "merchant_id",    "TEXT NOT NULL DEFAULT 'default'")
+        _migrate_add_column(mig_conn, "hitl_queue",    "ab_arm",         "TEXT NOT NULL DEFAULT ''")
+        mig_conn.commit()
+    finally:
+        mig_conn.close()
+
+    logger.info("Database initialised at %s (WAL mode)", db_path)
 
 
 def _migrate_add_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     """Idempotent ALTER TABLE — silently skips if column already exists."""
     try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        conn.commit()
         logger.info("Migration: added column %s.%s", table, column)
     except sqlite3.OperationalError:
-        pass  # column already exists
+        pass  # column already exists — that's fine
 
 
 # ── Hash-chain ledger ─────────────────────────────────────────────────────────
