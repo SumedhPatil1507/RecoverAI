@@ -11,7 +11,7 @@
 [![LightGBM](https://img.shields.io/badge/LightGBM-ML%20Scoring-blue?style=for-the-badge)](https://lightgbm.readthedocs.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
-**RecoverAI autonomously detects failed payments, scores them with a LightGBM ML model, classifies root causes via an AI agent, executes targeted recovery actions, and logs every decision in a tamper-proof cryptographic audit ledger — all in under 30 ms per webhook.**
+**RecoverAI autonomously detects failed payments, scores them with a LightGBM ML model, classifies root causes via an AI agent, executes targeted recovery actions, and logs every decision in a tamper-proof cryptographic audit ledger — all in under 30 ms per webhook.** The webhook event model follows Razorpay's documented `payment.failed` event, which is triggered when a payment fails [1]. The latency figure is an application target measured by this project, not a Razorpay service-level guarantee.
 
 [🚀 Live Demo](https://recoverai-enterprise.streamlit.app) · [📖 API Docs](https://recoverai-api.onrender.com/docs) · [📋 Deployment Guide](DEPLOYMENT.md)
 
@@ -49,13 +49,13 @@
 
 | Feature | Implementation |
 |---|---|
-| ⚡ **Sub-30ms Webhook ACK** | FastAPI + `asyncio.Queue` — response before any DB/AI work |
-| 🤖 **ML Recoverability Scoring** | LightGBM + calibrated probabilities (0.00→1.00); score < 0.15 → skip |
+| ⚡ **Sub-30ms Webhook ACK** | FastAPI + `asyncio.Queue` — response before any DB/AI work; FastAPI documents database-backed applications and SQLite as a single-file option with Python support [4]. |
+| 🤖 **ML Recoverability Scoring** | LightGBM + calibrated probabilities (0.00→1.00); score < 0.15 → skip. LightGBM is the model library used by this project [10]. |
 | 🧠 **AI Recovery Agent** | OpenAI GPT-4o-mini with 3s hard timeout → instant rule-engine fallback |
-| 🔒 **Tamper-Proof Audit Ledger** | SHA-256 hash chain — every decision cryptographically linked |
-| 🛡️ **PCI-DSS Ready** | HMAC-SHA256 webhook auth, recursive PII/PAN masking, parameterized SQL |
-| 💰 **Financial Precision** | All amounts as **INTEGER PAISE** — zero floating-point errors |
-| 📊 **Live Plotly WebGL Dashboard** | Funnel, time-series, donut, histogram — auto-refreshes every 5s |
+| 🔒 **Tamper-Proof Audit Ledger** | SHA-256 hash chain — every decision cryptographically linked. SHA-256 is provided by Python's standard `hashlib` library [6], while SQLite WAL behavior is documented by SQLite [8]. |
+| 🛡️ **Webhook and Data Protections** | HMAC-SHA256 webhook auth, recursive PII/PAN masking, parameterized SQL. Python documents the `hmac` module for keyed message authentication [7], and Razorpay documents webhook validation and testing [2]. “PCI-DSS Ready” is an implementation goal, not a compliance certification. |
+| 💰 **Financial Precision** | All amounts as **INTEGER PAISE** — zero floating-point errors within the integer representation |
+| 📊 **Live Plotly Dashboard** | Funnel, time-series, donut, histogram, dataframes, and controls use Streamlit and Plotly APIs [3] [9] |
 | 🔄 **Resilient by Design** | LLM timeout → rule engine, exponential backoff retries via `tenacity` |
 
 ---
@@ -312,7 +312,7 @@ Response (< 30ms):
 ## 🛡️ Security Design
 
 ### HMAC-SHA256 Webhook Authentication
-Every request to `POST /webhook/razorpay` is verified using constant-time comparison (`hmac.compare_digest`) before any processing. Requests with missing or invalid `X-Razorpay-Signature` headers are rejected with HTTP 401.
+Every request to `POST /webhook/razorpay` is verified using constant-time comparison (`hmac.compare_digest`) before any processing. Requests with missing or invalid `X-Razorpay-Signature` headers are rejected with HTTP 401. The keyed-authentication primitive and constant-time comparison are provided by Python's `hmac` module [7], while Razorpay's validation guidance is documented in [2].
 
 ### Recursive PII / PAN Masking
 Before any database write or LLM call, all sensitive fields are masked:
@@ -336,7 +336,7 @@ log_id=2  prev=a3f9...         → hash=7bc2...
 log_id=3  prev=7bc2...         → hash=e441...
 ```
 
-Any modification to a past record breaks the chain and is detected by `GET /api/audit/verify`.
+Any modification to a past record breaks the chain and is detected by `GET /api/audit/verify`. The implementation uses SHA-256 from Python's standard `hashlib` library [6].
 
 ### SQL Injection Prevention
 100% parameterized queries throughout `database.py` — zero string interpolation in SQL.
@@ -366,7 +366,7 @@ Output:
   score ≥ 0.15  →  Agent evaluation proceeds
 ```
 
-Training: 5,000 synthetic samples on first run (~25s), then auto-loaded from `recover_ai_lgbm.pkl`.
+Training: 5,000 synthetic samples on first run (~25s), then auto-loaded from `recover_ai_lgbm.pkl`. The model implementation uses LightGBM [10] and scikit-learn utilities [11]; the sample count and timing are project-specific measurements.
 
 ---
 
@@ -501,3 +501,26 @@ MIT License — see [LICENSE](LICENSE) for details.
 ⭐ Star this repo if it helped you · [Report Issues](https://github.com/SumedhPatil1507/RecoverAI/issues)
 
 </div>
+
+
+---
+
+## References
+
+The following sources support the README's externally verifiable statements about payment webhooks, framework capabilities, visualization, cryptographic primitives, and database behavior. Project-specific thresholds, timings, recovery outcomes, and architecture decisions are defined by this repository's code and are not vendor guarantees.
+
+| Ref. | Source | README-supported claim |
+|---|---|---|
+| [1] | [Razorpay — Payments Webhook Events](https://razorpay.com/docs/webhooks/payments/?preferred-country=US) | `payment.failed` is a payment webhook event triggered when a payment fails; webhook payloads are snapshots of the entity at event time. |
+| [2] | [Razorpay — Validate and Test Webhooks](https://razorpay.com/docs/webhooks/validate-test/?preferred-country=US) | Webhook validation and testing guidance, including signature-validation considerations. |
+| [3] | [Streamlit — API Reference](https://docs.streamlit.io/develop/api-reference) | Streamlit APIs for data applications, charts, dataframes, toggles, sliders, and application controls. |
+| [4] | [FastAPI — SQL (Relational) Databases](https://fastapi.tiangolo.com/tutorial/sql-databases/) | FastAPI can work with database libraries; the guide demonstrates SQLite as a single-file database with integrated Python support. |
+| [5] | [streamlit-autorefresh — GitHub](https://github.com/kmcgrady/streamlit-autorefresh) | The third-party component used by this project to periodically rerun the Streamlit script from a frontend timer. |
+| [6] | [Python — `hashlib` documentation](https://docs.python.org/3/library/hashlib.html) | Standard-library hash algorithms, including SHA-256. |
+| [7] | [Python — `hmac` documentation](https://docs.python.org/3/library/hmac.html) | Standard-library keyed-hash message authentication functionality. |
+| [8] | [SQLite — Write-Ahead Logging](https://sqlite.org/wal.html) | SQLite WAL journaling behavior and concurrency characteristics. |
+| [9] | [Plotly — Python Graphing Library](https://plotly.com/python/) | Plotly's Python charting and interactive visualization capabilities. |
+| [10] | [LightGBM documentation](https://lightgbm.readthedocs.io/en/latest/) | LightGBM model library used by the recoverability scorer. |
+| [11] | [scikit-learn documentation](https://scikit-learn.org/stable/) | Machine-learning utilities used alongside the scoring pipeline where applicable. |
+
+*RecoverAI Enterprise v2.0.0 · Razorpay AI Buildathon Track 03*
