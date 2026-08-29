@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: recoverai
+  labels:
+    app.kubernetes.io/name: recoverai
+    app.kubernetes.io/managed-by: terraform

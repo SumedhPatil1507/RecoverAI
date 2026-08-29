@@ -1,27 +1,58 @@
+###############################################################################
+# RecoverAI Enterprise – Docker Compose (local dev + integration testing)
+###############################################################################
+# Usage:
+#   docker compose up api dashboard          # core stack
+#   docker compose --profile dev up          # + simulator
+#   docker compose --profile chaos up        # + chaos stress test
+#   docker compose --profile monitoring up   # + Prometheus + Grafana
+###############################################################################
+
 version: "3.9"
 
 x-common: &common
-  build: { context: ., target: runtime }
+  build:
+    context: .
+    target: runtime
   env_file: .env
   restart: unless-stopped
+  networks:
+    - recoverai
+
+# ── Services ──────────────────────────────────────────────────────────────────
 
 services:
+
+  # ── FastAPI gateway ────────────────────────────────────────────────────────
   api:
     <<: *common
     container_name: recoverai-api
-    command: uvicorn recover_ai.main:app --host 0.0.0.0 --port 8000
-    ports: ["8000:8000"]
-    volumes: ["db_data:/app/data"]
+    command: >
+      uvicorn recover_ai.main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 2
+      --loop uvloop
+    ports:
+      - "8000:8000"
+    volumes:
+      - db_data:/app/data
     environment:
       DATABASE_PATH: /app/data/recover_ai_enterprise.db
       ML_MODEL_PATH: /app/data/recover_ai_lgbm.pkl
+      ENVIRONMENT: development
+      QUEUE_WORKERS: "4"
+      AB_VARIANT_PCT: "50"
+      DRIFT_CHECK_INTERVAL: "200"
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 15s
       timeout: 5s
       retries: 3
+      start_period: 20s
 
+  # ── Streamlit dashboard ────────────────────────────────────────────────────
   dashboard:
     <<: *common
     container_name: recoverai-dashboard
@@ -30,24 +61,88 @@ services:
       --server.port=8501
       --server.address=0.0.0.0
       --server.headless=true
-    ports: ["8501:8501"]
-    volumes: ["db_data:/app/data"]
+    ports:
+      - "8501:8501"
+    volumes:
+      - db_data:/app/data
     environment:
       DATABASE_PATH: /app/data/recover_ai_enterprise.db
       ML_MODEL_PATH: /app/data/recover_ai_lgbm.pkl
     depends_on:
-      api: { condition: service_healthy }
+      api:
+        condition: service_healthy
 
+  # ── Data simulator (dev profile) ──────────────────────────────────────────
   simulator:
     <<: *common
     container_name: recoverai-simulator
-    command: python recover_ai/data_simulator.py
+    command: python recover_ai/data_simulator.py --interval 3
     environment:
       WEBHOOK_BASE_URL: http://api:8000
       DATABASE_PATH: /app/data/recover_ai_enterprise.db
     depends_on:
-      api: { condition: service_healthy }
+      api:
+        condition: service_healthy
     profiles: [dev]
+
+  # ── Chaos stress test (chaos profile) ────────────────────────────────────
+  chaos:
+    <<: *common
+    container_name: recoverai-chaos
+    command: python recover_ai/data_simulator.py --chaos 500 --workers 64
+    environment:
+      WEBHOOK_BASE_URL: http://api:8000
+      DATABASE_PATH: /app/data/recover_ai_enterprise.db
+    depends_on:
+      api:
+        condition: service_healthy
+    profiles: [chaos]
+    restart: "no"
+
+  # ── Prometheus (monitoring profile) ──────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: recoverai-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - recoverai
+    profiles: [monitoring]
+    restart: unless-stopped
+
+  # ── Grafana (monitoring profile) ─────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: recoverai-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-recoverai-dev}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - recoverai
+    depends_on:
+      - prometheus
+    profiles: [monitoring]
+    restart: unless-stopped
+
+# ── Networks & volumes ────────────────────────────────────────────────────────
+
+networks:
+  recoverai:
+    driver: bridge
 
 volumes:
   db_data:
+  prometheus_data:
+  grafana_data:

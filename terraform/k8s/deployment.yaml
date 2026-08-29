@@ -1,0 +1,165 @@
+###############################################################################
+# RecoverAI Enterprise – Kubernetes Deployment (EKS Fargate)
+###############################################################################
+
+# ── API (FastAPI) ─────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recoverai-api
+  namespace: recoverai
+  labels:
+    app: recoverai-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: recoverai-api
+  template:
+    metadata:
+      labels:
+        app: recoverai-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: recoverai-sa
+      containers:
+        - name: api
+          image: REPLACE_WITH_ECR_URL:latest   # replaced by CI/CD
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          command: ["uvicorn", "recover_ai.main:app",
+                    "--host", "0.0.0.0", "--port", "8000",
+                    "--workers", "2", "--loop", "uvloop"]
+          env:
+            - name: ENVIRONMENT
+              value: "production"
+            - name: QUEUE_WORKERS
+              value: "4"
+            - name: AB_VARIANT_PCT
+              value: "50"
+          envFrom:
+            - secretRef:
+                name: recoverai-secrets   # populated from Secrets Manager via ESO
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+---
+# ── Dashboard (Streamlit) ─────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recoverai-dashboard
+  namespace: recoverai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: recoverai-dashboard
+  template:
+    metadata:
+      labels:
+        app: recoverai-dashboard
+    spec:
+      serviceAccountName: recoverai-sa
+      containers:
+        - name: dashboard
+          image: REPLACE_WITH_ECR_URL:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8501
+          command: ["streamlit", "run", "streamlit_app.py",
+                    "--server.port=8501", "--server.address=0.0.0.0",
+                    "--server.headless=true"]
+          envFrom:
+            - secretRef:
+                name: recoverai-secrets
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+---
+# ── Services ──────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: recoverai-api-svc
+  namespace: recoverai
+spec:
+  selector:
+    app: recoverai-api
+  ports:
+    - port: 80
+      targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: recoverai-dashboard-svc
+  namespace: recoverai
+spec:
+  selector:
+    app: recoverai-dashboard
+  ports:
+    - port: 80
+      targetPort: 8501
+  type: ClusterIP
+---
+# ── ServiceAccount (IRSA) ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: recoverai-sa
+  namespace: recoverai
+  annotations:
+    eks.amazonaws.com/role-arn: REPLACE_WITH_IRSA_ROLE_ARN   # set by Terraform output
+---
+# ── HPA ───────────────────────────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: recoverai-api-hpa
+  namespace: recoverai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: recoverai-api
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75

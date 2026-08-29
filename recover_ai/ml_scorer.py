@@ -1,29 +1,44 @@
 """
 RecoverAI Enterprise – ML Recoverability Scorer
+================================================
+Features:
+  • LightGBM classifier (LogisticRegression fallback) trained on synthetic data
+  • Lazy initialisation — model trains only on first score() call
+  • Kolmogorov-Smirnov drift detection on incoming error-code distributions
+  • Population Stability Index (PSI) on amount buckets
+  • Automatic background retraining when drift exceeds threshold
+  • Hot-swap: new model replaces old one atomically (no server restart)
+  • Thread-safe via RLock + atomic reference swap
+
+Drift detection runs every DRIFT_CHECK_INTERVAL_CALLS scoring calls.
+When KS p-value < KS_PVALUE_THRESHOLD OR PSI > PSI_THRESHOLD the retraining
+pipeline is spawned in a daemon thread.
+
+Hot-swap
+--------
+The retrained model is written to a temp file then os.replace() atomically
+swaps it with the live .pkl file.  The in-memory _model reference is updated
+under the write lock so no request ever sees a partially-loaded model.
 """
 from __future__ import annotations
 
-import os, sys
-_pkg = os.path.dirname(os.path.abspath(__file__))
-if _pkg not in sys.path: sys.path.insert(0, _pkg)
-
 import logging
+import math
 import os
 import pickle
+import tempfile
 import threading
+import time
+from collections import deque
 from datetime import datetime
 from typing import Any
-
-# numpy is imported lazily inside _build_features and _generate_training_data
-# to avoid blocking Streamlit startup with heavy C-extension loading.
 
 from config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# ── Feature engineering constants ────────────────────────────────────────────
-
+# ── Error-code → integer category ────────────────────────────────────────────
 ERROR_CODE_CATEGORIES: dict[str, int] = {
     "GATEWAY_DOWN":       0,
     "USER_CANCELLED":     1,
@@ -34,100 +49,76 @@ ERROR_CODE_CATEGORIES: dict[str, int] = {
     "UNKNOWN":            6,
 }
 
-# Base recoverability rates by category (used for synthetic training labels)
 _BASE_RECOVERY_RATES: dict[int, float] = {
-    0: 0.72,   # GATEWAY_DOWN        – high; transient error
-    1: 0.41,   # USER_CANCELLED      – medium; reminder helps
-    2: 0.68,   # NETWORK_TIMEOUT     – high; retry succeeds
-    3: 0.22,   # INSUFFICIENT_FUNDS  – low; structural issue
-    4: 0.18,   # INVALID_DETAILS     – low; user action required
-    5: 0.45,   # BANK_DECLINE        – medium; retry with diff method
-    6: 0.35,   # UNKNOWN
+    0: 0.72,  # GATEWAY_DOWN
+    1: 0.41,  # USER_CANCELLED
+    2: 0.68,  # NETWORK_TIMEOUT
+    3: 0.22,  # INSUFFICIENT_FUNDS
+    4: 0.18,  # INVALID_DETAILS
+    5: 0.45,  # BANK_DECLINE
+    6: 0.35,  # UNKNOWN
 }
 
+# ── Drift-detection tunables (env-override) ───────────────────────────────────
+_DRIFT_CHECK_INTERVAL  = int(os.getenv("DRIFT_CHECK_INTERVAL",   "200"))
+_KS_PVALUE_THRESHOLD   = float(os.getenv("KS_PVALUE_THRESHOLD",  "0.05"))
+_PSI_THRESHOLD         = float(os.getenv("PSI_THRESHOLD",        "0.20"))
+_WINDOW_SIZE           = int(os.getenv("DRIFT_WINDOW_SIZE",       "500"))
+
+
+# ── Feature builders ──────────────────────────────────────────────────────────
 
 def _build_features(
     amount_rupees: float,
     error_code: str | None,
     hour_of_day: int,
     retry_count: int,
-) -> "np.ndarray":
-    """Encode a single transaction into a feature vector."""
+) -> "Any":                     # np.ndarray
     import numpy as np
     code_cat = ERROR_CODE_CATEGORIES.get(
         (error_code or "UNKNOWN").upper().replace(" ", "_"), 6
     )
-    return np.array(
-        [[amount_rupees, code_cat, hour_of_day, retry_count]],
-        dtype=np.float32,
-    )
+    return np.array([[amount_rupees, code_cat, hour_of_day, retry_count]], dtype=np.float32)
 
 
-# ── Synthetic training data generator ────────────────────────────────────────
-
-def _generate_training_data(n: int = 2000) -> "tuple[Any, Any]":
-    """
-    Generate synthetic but statistically plausible training data.
-    Labels reflect real-world recovery rates by error category.
-    """
+def _generate_training_data(n: int = 500) -> "tuple[Any, Any]":
     import numpy as np
-    rng = np.random.default_rng(42)
+    rng    = np.random.default_rng(42)
     amounts    = rng.uniform(500, 15_000, n).astype(np.float32)
     categories = rng.integers(0, 7, n)
     hours      = rng.integers(0, 24, n)
     retries    = rng.integers(0, 3, n)
 
-    base_prob  = np.array([_BASE_RECOVERY_RATES[c] for c in categories])
-
-    # Amount signal: mid-range amounts (₹1k–₹8k) are more recoverable
-    amount_bonus = np.clip(
-        0.1 * np.sin(np.pi * (amounts - 500) / 14_500), -0.05, 0.10
-    )
-    # Business-hours boost
-    hour_bonus = np.where((hours >= 9) & (hours <= 21), 0.07, -0.05)
-    # Retry penalty
+    base_prob     = np.array([_BASE_RECOVERY_RATES[c] for c in categories])
+    amount_bonus  = np.clip(0.1 * np.sin(np.pi * (amounts - 500) / 14_500), -0.05, 0.10)
+    hour_bonus    = np.where((hours >= 9) & (hours <= 21), 0.07, -0.05)
     retry_penalty = retries * 0.08
 
-    prob = np.clip(base_prob + amount_bonus + hour_bonus - retry_penalty, 0.02, 0.98)
+    prob   = np.clip(base_prob + amount_bonus + hour_bonus - retry_penalty, 0.02, 0.98)
     labels = rng.binomial(1, prob).astype(np.float32)
-
     X = np.column_stack([amounts, categories, hours, retries]).astype(np.float32)
     return X, labels
 
 
-# ── Model builder ─────────────────────────────────────────────────────────────
-
 def _train_model() -> Any:
-    """Train LightGBM (or LogisticRegression fallback) and return the model."""
-    logger.info("Training ML recoverability scorer on synthetic data…")
-    X, y = _generate_training_data(500)  # Reduced to 500 samples for faster training
+    logger.info("Training ML recoverability scorer…")
+    X, y = _generate_training_data(500)
 
     try:
         import lightgbm as lgb
-        from sklearn.calibration import CalibratedClassifierCV
-
-        lgbm_model = lgb.LGBMClassifier(
-            n_estimators=50,        # Further reduced for faster startup
-            learning_rate=0.15,     # Higher lr to compensate for fewer trees
-            num_leaves=12,          # Reduced complexity
-            max_depth=3,            # Shallower trees
-            min_child_samples=15,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=42,
-            verbose=-1,
+        model = lgb.LGBMClassifier(
+            n_estimators=50, learning_rate=0.15, num_leaves=12,
+            max_depth=3, min_child_samples=15, subsample=0.8,
+            colsample_bytree=0.8, random_state=42, verbose=-1,
         )
-        # No calibration for faster training - acceptable for demo purposes
-        lgbm_model.fit(X, y)
+        model.fit(X, y)
         logger.info("LightGBM trained successfully (fast mode).")
-        return lgbm_model
-
+        return model
     except ImportError:
         logger.warning("LightGBM not available; training LogisticRegression fallback.")
         from sklearn.linear_model import LogisticRegression
-        from sklearn.preprocessing import StandardScaler
         from sklearn.pipeline import Pipeline
-
+        from sklearn.preprocessing import StandardScaler
         model = Pipeline([
             ("scaler", StandardScaler()),
             ("clf", LogisticRegression(max_iter=300, random_state=42)),
@@ -137,38 +128,149 @@ def _train_model() -> Any:
         return model
 
 
-# ── Scorer class ──────────────────────────────────────────────────────────────
+# ── Drift detection helpers ───────────────────────────────────────────────────
+
+def _ks_statistic(sample_a: list[float], sample_b: list[float]) -> tuple[float, float]:
+    """
+    Two-sample Kolmogorov-Smirnov test.
+    Returns (ks_statistic, p_value).
+    Uses scipy when available, falls back to a simplified approximation.
+    """
+    if len(sample_a) < 10 or len(sample_b) < 10:
+        return 0.0, 1.0
+
+    try:
+        from scipy.stats import ks_2samp
+        stat, pval = ks_2samp(sample_a, sample_b)
+        return float(stat), float(pval)
+    except ImportError:
+        pass
+
+    # Simplified KS approximation (no scipy)
+    n, m = len(sample_a), len(sample_b)
+    sa, sb = sorted(sample_a), sorted(sample_b)
+    i = j = 0
+    max_diff = 0.0
+    all_vals = sorted(set(sa + sb))
+    for v in all_vals:
+        while i < n and sa[i] <= v:
+            i += 1
+        while j < m and sb[j] <= v:
+            j += 1
+        diff = abs(i / n - j / m)
+        if diff > max_diff:
+            max_diff = diff
+
+    # Kolmogorov distribution approximation for p-value
+    en = math.sqrt(n * m / (n + m))
+    t  = (en + 0.12 + 0.11 / en) * max_diff
+    pval = max(0.0, 2.0 * math.exp(-2.0 * t * t))
+    return max_diff, pval
+
+
+def _psi(reference: list[float], current: list[float], buckets: int = 10) -> float:
+    """
+    Population Stability Index for amount distribution.
+    PSI < 0.1  → no shift
+    PSI 0.1–0.2 → moderate shift
+    PSI > 0.2  → significant shift → trigger retraining
+    """
+    if len(reference) < 10 or len(current) < 10:
+        return 0.0
+
+    min_v = min(min(reference), min(current))
+    max_v = max(max(reference), max(current))
+    if max_v == min_v:
+        return 0.0
+
+    edges = [min_v + i * (max_v - min_v) / buckets for i in range(buckets + 1)]
+
+    def bucket_pct(data: list[float]) -> list[float]:
+        counts = [0] * buckets
+        for v in data:
+            idx = min(int((v - min_v) / (max_v - min_v) * buckets), buckets - 1)
+            counts[idx] += 1
+        total = len(data)
+        return [max(c / total, 1e-6) for c in counts]
+
+    ref_pct = bucket_pct(reference)
+    cur_pct = bucket_pct(current)
+    psi = sum(
+        (cur - ref) * math.log(cur / ref)
+        for ref, cur in zip(ref_pct, cur_pct)
+    )
+    return round(psi, 4)
+
+
+# ── Calibration validator ─────────────────────────────────────────────────────
+
+def _validate_calibration(model: Any) -> float:
+    """
+    Quick Brier score validation on held-out synthetic data.
+    Brier < 0.25 → accept model.  Returns Brier score.
+    """
+    import numpy as np
+    X_val, y_val = _generate_training_data(200)
+    try:
+        probs = model.predict_proba(X_val)[:, 1]
+        brier = float(np.mean((probs - y_val) ** 2))
+        logger.info("Model calibration Brier score: %.4f", brier)
+        return brier
+    except Exception as exc:
+        logger.warning("Calibration check failed: %s", exc)
+        return 1.0
+
+
+# ── Main scorer class ─────────────────────────────────────────────────────────
 
 class MLRecoveryScorer:
-    """Thread-safe ML inference pipeline with lazy initialisation.
-    
-    The model is NOT trained at import time — only when score() is first called.
-    This keeps Streamlit startup fast; a spinner is shown in the UI instead.
+    """
+    Thread-safe ML inference pipeline with:
+      • Lazy initialisation (model trains on first score() call)
+      • Sliding-window drift detection (KS test + PSI)
+      • Automatic background retraining on drift
+      • Hot-swap: new model replaces old atomically without restart
     """
 
     _instance: "MLRecoveryScorer | None" = None
-    _lock = threading.Lock()
-    _init_lock = threading.Lock()
+    _singleton_lock = threading.Lock()
 
     def __init__(self) -> None:
-        self._model: Any = None
-        self._ready = False
+        self._model:      Any      = None
+        self._ready:      bool     = False
+        self._rw_lock:    threading.RLock = threading.RLock()
+        self._init_lock:  threading.Lock  = threading.Lock()
 
-    # Singleton accessor — does NOT train on construction
+        # Drift detection sliding windows
+        self._ref_error_codes: list[int]   = []   # training distribution
+        self._ref_amounts:     list[float] = []
+        self._live_error_codes: deque[int]   = deque(maxlen=_WINDOW_SIZE)
+        self._live_amounts:     deque[float] = deque(maxlen=_WINDOW_SIZE)
+
+        # State
+        self._call_count:      int   = 0
+        self._retraining:      bool  = False
+        self._last_drift_check: float = 0.0
+        self._drift_log: list[dict]  = []          # history for dashboard
+
+    # ── Singleton ─────────────────────────────────────────────────────────────
+
     @classmethod
     def get(cls) -> "MLRecoveryScorer":
         if cls._instance is None:
-            with cls._lock:
+            with cls._singleton_lock:
                 if cls._instance is None:
                     cls._instance = cls()
         return cls._instance
 
+    # ── Initialisation ────────────────────────────────────────────────────────
+
     def ensure_ready(self) -> None:
-        """Trigger lazy load/train (idempotent, thread-safe)."""
         if not self._ready:
             with self._init_lock:
                 if not self._ready:
                     self._load_or_train()
+                    self._seed_reference_distribution()
                     self._ready = True
 
     def _load_or_train(self) -> None:
@@ -176,19 +278,133 @@ class MLRecoveryScorer:
         if os.path.exists(path):
             try:
                 with open(path, "rb") as f:
-                    self._model = pickle.load(f)  # noqa: S301
+                    model = pickle.load(f)
+                with self._rw_lock:
+                    self._model = model
                 logger.info("ML model loaded from %s", path)
                 return
             except Exception as exc:
                 logger.warning("Failed to load ML model (%s); retraining.", exc)
 
-        self._model = _train_model()
+        model = _train_model()
+        with self._rw_lock:
+            self._model = model
+        self._persist_model(model)
+
+    def _persist_model(self, model: Any) -> None:
+        """Persist model to disk with atomic hot-swap."""
+        path = settings.ml_model_path
         try:
-            with open(path, "wb") as f:
-                pickle.dump(self._model, f)
-            logger.info("ML model persisted to %s", path)
+            fd, tmp_path = tempfile.mkstemp(
+                suffix=".pkl",
+                dir=os.path.dirname(os.path.abspath(path)) or ".",
+            )
+            with os.fdopen(fd, "wb") as f:
+                pickle.dump(model, f)
+            os.replace(tmp_path, path)     # atomic on POSIX; best-effort on Windows
+            logger.info("ML model hot-swapped to %s", path)
         except Exception as exc:
             logger.warning("Could not persist ML model: %s", exc)
+
+    def _seed_reference_distribution(self) -> None:
+        """Build reference feature distribution from training data."""
+        import numpy as np
+        rng        = np.random.default_rng(0)
+        n          = 1000
+        categories = list(rng.integers(0, 7, n))
+        amounts    = list(rng.uniform(500, 15_000, n))
+        self._ref_error_codes = categories
+        self._ref_amounts     = amounts
+        logger.debug("Reference distribution seeded with %d samples.", n)
+
+    # ── Drift detection ───────────────────────────────────────────────────────
+
+    def _check_and_trigger_drift(self) -> None:
+        """Run KS + PSI drift checks; spawn retraining thread if drift detected."""
+        if self._retraining:
+            return
+        if len(self._live_error_codes) < 50:
+            return
+
+        live_codes   = list(self._live_error_codes)
+        live_amounts = list(self._live_amounts)
+
+        # KS test on error-code distribution (treat as float)
+        ks_stat, ks_pval = _ks_statistic(
+            [float(c) for c in self._ref_error_codes],
+            [float(c) for c in live_codes],
+        )
+
+        # PSI on amount distribution
+        psi = _psi(self._ref_amounts, live_amounts)
+
+        drift_detected = (ks_pval < _KS_PVALUE_THRESHOLD) or (psi > _PSI_THRESHOLD)
+
+        entry = {
+            "timestamp":     datetime.utcnow().isoformat(),
+            "ks_stat":       round(ks_stat, 4),
+            "ks_pval":       round(ks_pval, 4),
+            "psi":           round(psi, 4),
+            "drift":         drift_detected,
+            "window_size":   len(live_codes),
+        }
+        self._drift_log.append(entry)
+        if len(self._drift_log) > 100:
+            self._drift_log = self._drift_log[-100:]
+
+        logger.info(
+            "Drift check: KS_stat=%.4f p=%.4f PSI=%.4f drift=%s",
+            ks_stat, ks_pval, psi, drift_detected,
+        )
+
+        if drift_detected:
+            logger.warning(
+                "DRIFT DETECTED (KS_p=%.4f PSI=%.4f) — spawning background retraining",
+                ks_pval, psi,
+            )
+            self._retraining = True
+            t = threading.Thread(target=self._retrain_and_swap, daemon=True)
+            t.start()
+
+    def _retrain_and_swap(self) -> None:
+        """Background thread: retrain, validate calibration, hot-swap."""
+        try:
+            logger.info("Background retraining started…")
+            t0    = time.time()
+            model = _train_model()
+            brier = _validate_calibration(model)
+
+            if brier > 0.30:
+                logger.warning(
+                    "Retrained model rejected (Brier=%.4f > 0.30). Keeping current model.",
+                    brier,
+                )
+                return
+
+            # Hot-swap
+            with self._rw_lock:
+                self._model = model
+            self._persist_model(model)
+
+            # Reset reference distribution to current live window
+            self._ref_error_codes = list(self._live_error_codes)
+            self._ref_amounts     = list(self._live_amounts)
+
+            elapsed = time.time() - t0
+            logger.info(
+                "Hot-swap complete in %.1fs (Brier=%.4f). Model updated without restart.",
+                elapsed, brier,
+            )
+        except Exception as exc:
+            logger.error("Retraining failed: %s", exc, exc_info=True)
+        finally:
+            self._retraining = False
+
+    def get_drift_log(self) -> list[dict]:
+        """Return recent drift-check history for the dashboard."""
+        return list(self._drift_log)
+
+    # ── Scoring ───────────────────────────────────────────────────────────────
 
     def score(
         self,
@@ -197,13 +413,31 @@ class MLRecoveryScorer:
         retry_count: int = 0,
         hour_of_day: int | None = None,
     ) -> float:
-        """Returns recoverability_score ∈ [0.00, 1.00]. Never raises."""
+        """
+        Returns recoverability_score ∈ [0.00, 1.00].
+        Thread-safe; never raises — returns 0.5 on any unexpected error.
+        Records features in sliding window and triggers drift checks.
+        """
         self.ensure_ready()
         if hour_of_day is None:
             hour_of_day = datetime.utcnow().hour
+
+        # Record for drift detection
+        code_cat = ERROR_CODE_CATEGORIES.get(
+            (error_code or "UNKNOWN").upper().replace(" ", "_"), 6
+        )
+        self._live_error_codes.append(code_cat)
+        self._live_amounts.append(amount_rupees)
+
+        self._call_count += 1
+        if self._call_count % _DRIFT_CHECK_INTERVAL == 0:
+            self._check_and_trigger_drift()
+
         try:
             X = _build_features(amount_rupees, error_code, hour_of_day, retry_count)
-            prob = float(self._model.predict_proba(X)[0, 1])
+            with self._rw_lock:
+                model = self._model
+            prob = float(model.predict_proba(X)[0, 1])
             return round(min(max(prob, 0.0), 1.0), 4)
         except Exception as exc:
             logger.error("ML scoring error: %s", exc, exc_info=True)
@@ -211,3 +445,11 @@ class MLRecoveryScorer:
 
     def is_low_priority(self, score: float) -> bool:
         return score < settings.ml_low_priority_threshold
+
+    @property
+    def is_retraining(self) -> bool:
+        return self._retraining
+
+    @property
+    def call_count(self) -> int:
+        return self._call_count

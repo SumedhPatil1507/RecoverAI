@@ -1,19 +1,43 @@
 """
 RecoverAI Enterprise – Async Multi-Agent Recovery Orchestrator
+==============================================================
+Pipeline (per transaction):
+  Ingest → ML_Score → A/B Route → [LLM | Rule Engine] →
+  HITL Gate → Dispatch Recovery → Cryptographic Audit Log
+
+A/B Experiment
+--------------
+Arm assignment is deterministic per payment_id (hash-based) so reruns
+of the same ID always land on the same arm.  50/50 split by default;
+configurable via AB_VARIANT_PCT env var (0–100).
+
+HITL Gate
+---------
+A transaction is held in PENDING_APPROVAL when:
+  • amount > ₹50,000  (configurable: HITL_AMOUNT_THRESHOLD_PAISE)
+  • proposed discount > 10%  (HITL_DISCOUNT_THRESHOLD_PCT)
+  • ML score in ambiguous band 0.40–0.60  (HITL_SCORE_AMBIGUOUS_BAND)
+  • recovery_attempts >= 3  (repeated failure)
+
+Integration Hooks
+-----------------
+After a decision is reached the engine:
+  1. Creates a Razorpay Payment Link (mock unless keys present)
+  2. Dispatches the link via WhatsApp / SMS (mock unless creds present)
 """
 from __future__ import annotations
 
-import os, sys
-_pkg = os.path.dirname(os.path.abspath(__file__))
-if _pkg not in sys.path: sys.path.insert(0, _pkg)
-
-import asyncio
-import json
+import hashlib
 import logging
+import os
 import random
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+
+import asyncio
+import json
 
 from tenacity import (
     retry,
@@ -28,6 +52,8 @@ from ml_scorer import MLRecoveryScorer
 from schemas import (
     AuditSource,
     FailureCategory,
+    HITLDecision,
+    HITLTriggerReason,
     ProcessedTransaction,
     RecoveryAction,
     RecoveryActionType,
@@ -36,6 +62,14 @@ from schemas import (
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# ── Runtime tunables (env-override) ──────────────────────────────────────────
+_AB_VARIANT_PCT            = int(os.getenv("AB_VARIANT_PCT", "50"))          # 0-100
+_HITL_AMOUNT_THRESHOLD     = int(os.getenv("HITL_AMOUNT_THRESHOLD_PAISE",    "5000000"))   # ₹50k
+_HITL_DISCOUNT_THRESHOLD   = float(os.getenv("HITL_DISCOUNT_THRESHOLD_PCT",  "10.0"))
+_HITL_SCORE_BAND_LOW       = float(os.getenv("HITL_SCORE_BAND_LOW",          "0.40"))
+_HITL_SCORE_BAND_HIGH      = float(os.getenv("HITL_SCORE_BAND_HIGH",         "0.60"))
+_HITL_REPEAT_THRESHOLD     = int(os.getenv("HITL_REPEAT_THRESHOLD",          "3"))
 
 
 # ── Deterministic Rule Matrix ─────────────────────────────────────────────────
@@ -58,7 +92,6 @@ _CATEGORY_MAP: dict[str, FailureCategory] = {
     "BANK_DECLINE":       FailureCategory.BANK_DECLINE,
 }
 
-# attempt 1 / attempt 2 escalation matrix
 _ACTION_MATRIX: dict[FailureCategory, tuple[RecoveryActionType, RecoveryActionType]] = {
     FailureCategory.GATEWAY_DOWN:       (RecoveryActionType.RETRY_PAYMENT,       RecoveryActionType.OFFER_ALTERNATE_UPI),
     FailureCategory.NETWORK_TIMEOUT:    (RecoveryActionType.RETRY_PAYMENT,       RecoveryActionType.OFFER_ALTERNATE_UPI),
@@ -70,7 +103,9 @@ _ACTION_MATRIX: dict[FailureCategory, tuple[RecoveryActionType, RecoveryActionTy
 }
 
 
-def _classify_failure(failure_code: str | None, failure_reason: str | None) -> FailureCategory:
+def _classify_failure(
+    failure_code: str | None, failure_reason: str | None
+) -> FailureCategory:
     combined = f"{(failure_code or '').upper()} {(failure_reason or '').upper()}"
     for key, cat in _CATEGORY_MAP.items():
         if key in combined:
@@ -78,36 +113,74 @@ def _classify_failure(failure_code: str | None, failure_reason: str | None) -> F
     return FailureCategory.UNKNOWN
 
 
+# ── A/B arm assignment ────────────────────────────────────────────────────────
+
+def assign_ab_arm(payment_id: str) -> str:
+    """
+    Deterministic 50/50 assignment based on SHA-256 of payment_id.
+    Returns "variant" for the top AB_VARIANT_PCT% of the hash space,
+    "control" otherwise.
+    """
+    digest = int(hashlib.sha256(payment_id.encode()).hexdigest(), 16)
+    bucket = digest % 100
+    return "variant" if bucket < _AB_VARIANT_PCT else "control"
+
+
+# ── HITL gate ─────────────────────────────────────────────────────────────────
+
+def _hitl_trigger_reason(
+    amount_paise: int,
+    proposed_discount: float,
+    ml_score: float,
+    attempts: int,
+) -> HITLTriggerReason | None:
+    """Return the first matching HITL trigger reason, or None if no gate needed."""
+    if amount_paise >= _HITL_AMOUNT_THRESHOLD:
+        return HITLTriggerReason.HIGH_VALUE
+    if proposed_discount > _HITL_DISCOUNT_THRESHOLD:
+        return HITLTriggerReason.HIGH_DISCOUNT
+    if attempts >= _HITL_REPEAT_THRESHOLD:
+        return HITLTriggerReason.REPEATED_FAIL
+    if _HITL_SCORE_BAND_LOW <= ml_score <= _HITL_SCORE_BAND_HIGH:
+        return HITLTriggerReason.AMBIGUOUS_SCORE
+    return None
+
+
+# ── Rule Engine ───────────────────────────────────────────────────────────────
+
 def _rule_engine_decide(
     txn_id: str,
     category: FailureCategory,
     score: float,
     attempts: int,
+    ab_arm: str = "",
 ) -> RecoveryAction:
     if attempts >= settings.max_recovery_attempts:
         return RecoveryAction(
             transaction_id=txn_id,
             action=RecoveryActionType.NO_ACTION,
-            reasoning=f"Max recovery attempts ({settings.max_recovery_attempts}) reached. Marking EXPIRED.",
+            reasoning=f"Max recovery attempts ({settings.max_recovery_attempts}) reached.",
             source=AuditSource.RULE_ENGINE,
             new_status=TransactionStatus.EXPIRED,
             confidence=1.0,
+            ab_arm=ab_arm,
         )
 
     actions = _ACTION_MATRIX.get(category, _ACTION_MATRIX[FailureCategory.UNKNOWN])
-    action = actions[min(attempts, 1)]
+    action  = actions[min(attempts, 1)]
 
     return RecoveryAction(
         transaction_id=txn_id,
         action=action,
         reasoning=(
-            f"Rule engine: category={category.value}, "
-            f"score={score:.2f}, attempt={attempts + 1}/{settings.max_recovery_attempts}. "
+            f"Rule engine: category={category.value}, score={score:.2f}, "
+            f"attempt={attempts + 1}/{settings.max_recovery_attempts}. "
             f"Selected '{action.value}' from deterministic matrix."
         ),
         source=AuditSource.RULE_ENGINE,
         new_status=TransactionStatus.ACTION_TRIGGERED,
         confidence=0.85,
+        ab_arm=ab_arm,
     )
 
 
@@ -143,13 +216,13 @@ async def _call_llm(user_message: str) -> dict[str, Any] | None:
                 "Content-Type": "application/json",
             },
             json={
-                "model": settings.llm_model,
-                "messages": [
+                "model":           settings.llm_model,
+                "messages":        [
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user",   "content": user_message},
                 ],
-                "max_tokens": settings.llm_max_tokens,
-                "temperature": 0.1,
+                "max_tokens":      settings.llm_max_tokens,
+                "temperature":     0.1,
                 "response_format": {"type": "json_object"},
             },
         )
@@ -162,11 +235,8 @@ async def _llm_decide(
     category: FailureCategory,
     score: float,
     attempts: int,
+    ab_arm: str = "",
 ) -> RecoveryAction | None:
-    """
-    Call LLM with 3s hard timeout + guardrail enforcement.
-    Returns None on any failure so the caller falls back to rule engine.
-    """
     if not settings.openai_api_key:
         return None
 
@@ -181,12 +251,14 @@ async def _llm_decide(
     )
 
     try:
-        raw = await asyncio.wait_for(_call_llm(user_msg), timeout=settings.llm_timeout_seconds)
+        raw = await asyncio.wait_for(
+            _call_llm(user_msg), timeout=settings.llm_timeout_seconds
+        )
         if raw is None:
             return None
+
         parsed = json.loads(raw) if isinstance(raw, str) else raw
 
-        # ── Guardrail enforcement ──────────────────────────────────────────
         discount = float(parsed.get("discount_pct", 0.0))
         guardrail_triggered = False
         if discount > settings.max_discount_pct:
@@ -197,23 +269,21 @@ async def _llm_decide(
             discount = 0.0
             guardrail_triggered = True
 
-        # Parse action
         try:
             action = RecoveryActionType(parsed.get("action", "NOTIFY_SUPPORT"))
         except ValueError:
             action = RecoveryActionType.NOTIFY_SUPPORT
 
-        # Parse category override
         try:
             cat_override = FailureCategory(parsed.get("failure_category", category.value))
         except ValueError:
             cat_override = category
 
-        # Determine new status
-        if attempts + 1 >= settings.max_recovery_attempts:
-            new_status = TransactionStatus.EXPIRED
-        else:
-            new_status = TransactionStatus.ACTION_TRIGGERED
+        new_status = (
+            TransactionStatus.EXPIRED
+            if attempts + 1 >= settings.max_recovery_attempts
+            else TransactionStatus.ACTION_TRIGGERED
+        )
 
         reasoning = parsed.get("reasoning", "LLM provided no reasoning.")
         if guardrail_triggered:
@@ -227,14 +297,57 @@ async def _llm_decide(
             discount_pct=discount,
             new_status=new_status,
             confidence=float(parsed.get("confidence", 0.8)),
+            ab_arm=ab_arm,
         )
 
     except asyncio.TimeoutError:
-        logger.warning("LLM timeout for txn %s → activating rule engine", txn.payment_id)
+        logger.warning("LLM timeout for txn %s → rule engine", txn.payment_id)
         return None
     except Exception as exc:
         logger.warning("LLM error for txn %s (%s) → rule engine", txn.payment_id, exc)
         return None
+
+
+# ── Integration helpers ───────────────────────────────────────────────────────
+
+async def _create_and_dispatch_link(
+    payment_id: str,
+    amount_paise: int,
+    email_redacted: str | None,
+    failure_reason: str | None,
+) -> str:
+    """
+    Create a Razorpay payment link and dispatch it via WhatsApp/SMS.
+    Returns the short URL (or mock URL). Never raises.
+    """
+    try:
+        from integrations.razorpay_links import PaymentLinkCustomer, PaymentLinkRequest, get_client
+        from integrations.whatsapp_notifier import DispatchChannel, get_dispatcher
+
+        client = get_client()
+        req = PaymentLinkRequest(
+            amount_rupees=amount_paise / 100,
+            description=f"Recovery: {failure_reason or 'Payment failed'}",
+            customer=PaymentLinkCustomer(email=email_redacted or ""),
+            reference_id=payment_id,
+            expire_minutes=60,
+        )
+        link_result = client.create(req)
+
+        dispatcher = get_dispatcher()
+        dispatcher.dispatch_recovery_link(
+            payment_id=payment_id,
+            amount_rupees=amount_paise / 100,
+            payment_link=link_result.short_url,
+            recipient_phone="",           # real phone would come from txn metadata
+            recipient_email=email_redacted or "",
+            failure_reason=failure_reason or "Payment failed",
+            channels=[DispatchChannel.EMAIL],
+        )
+        return link_result.short_url
+    except Exception as exc:
+        logger.warning("Link/dispatch failed for %s: %s", payment_id, exc)
+        return ""
 
 
 # ── Public pipeline entry point ───────────────────────────────────────────────
@@ -249,68 +362,60 @@ async def process_failed_payment(
     email_redacted: str | None,
 ) -> None:
     """
-    Full agent pipeline:
-    1. Persist raw transaction
-    2. ML scoring → LOW_PRIORITY_SKIP guard
-    3. LLM classification + decision (with timeout)
-    4. Deterministic fallback if LLM fails
-    5. Guardrail validation
-    6. Persistence + immutable audit log
+    Full LangGraph-style pipeline:
+      Ingest → ML_Score_Check → A/B Route →
+      [LLM (variant) | Rule Engine (control)] →
+      Discount Guardrail → HITL Gate →
+      Dispatch Recovery → Cryptographic Log
     """
     amount_rupees = float(Decimal(amount_paise) / Decimal(100))
-    logger.info("Agent pipeline: txn=%s ₹%.2f", payment_id, amount_rupees)
+    logger.info("Agent pipeline START: txn=%s ₹%.2f", payment_id, amount_rupees)
 
-    # 1. Persist
+    # ── Node 1: Ingest ────────────────────────────────────────────────────────
     db.upsert_transaction(
         payment_id, order_id, amount_paise, currency,
         failure_code, failure_reason, email_redacted,
     )
 
-    txn_row = db.get_transaction(payment_id)
+    txn_row  = db.get_transaction(payment_id)
     attempts = txn_row["recovery_attempts"] if txn_row else 0
 
     if attempts >= settings.max_recovery_attempts:
         db.update_transaction(payment_id, TransactionStatus.EXPIRED.value)
         db.append_audit_log(
-            payment_id,
-            RecoveryActionType.NO_ACTION.value,
+            payment_id, RecoveryActionType.NO_ACTION.value,
             f"Hard cap: {attempts} attempts exhausted.",
-            AuditSource.SYSTEM.value,
-            0.0,
+            AuditSource.SYSTEM.value, 0.0,
         )
         return
 
-    # 2. ML scoring
-    scorer = MLRecoveryScorer.get()
-    hour = datetime.now(timezone.utc).hour
-    score = scorer.score(amount_rupees, failure_code, attempts, hour)
+    # ── Node 2: ML Score Check ────────────────────────────────────────────────
+    scorer   = MLRecoveryScorer.get()
+    hour     = datetime.now(timezone.utc).hour
+    score    = scorer.score(amount_rupees, failure_code, attempts, hour)
     db.update_transaction(payment_id, TransactionStatus.ML_SCORED.value, recoverability_score=score)
-
     db.append_audit_log(
-        payment_id,
-        "ML_SCORED",
-        f"Recoverability score={score:.4f} (threshold={settings.ml_low_priority_threshold})",
-        AuditSource.ML_SCORER.value,
-        score,
+        payment_id, "ML_SCORED",
+        f"score={score:.4f} threshold={settings.ml_low_priority_threshold}",
+        AuditSource.ML_SCORER.value, score,
     )
 
     if scorer.is_low_priority(score):
         db.update_transaction(payment_id, TransactionStatus.LOW_PRIORITY_SKIP.value)
         db.append_audit_log(
-            payment_id,
-            "LOW_PRIORITY_SKIP",
-            f"Score {score:.4f} < {settings.ml_low_priority_threshold} threshold → skipped to conserve API budget.",
-            AuditSource.SYSTEM.value,
-            score,
+            payment_id, "LOW_PRIORITY_SKIP",
+            f"Score {score:.4f} < {settings.ml_low_priority_threshold} → skipped.",
+            AuditSource.SYSTEM.value, score,
         )
-        logger.info("Txn %s skipped (low priority score=%.4f)", payment_id, score)
         return
 
-    # 3. Classify failure
+    # ── Node 3: Root Cause Classify ───────────────────────────────────────────
     category = _classify_failure(failure_code, failure_reason)
-    db.update_transaction(payment_id, TransactionStatus.AGENT_EVALUATED.value, failure_category=category.value)
+    db.update_transaction(
+        payment_id, TransactionStatus.AGENT_EVALUATED.value,
+        failure_category=category.value,
+    )
 
-    # 4. Build transaction object for LLM
     txn = ProcessedTransaction(
         payment_id=payment_id,
         order_id=order_id,
@@ -325,12 +430,52 @@ async def process_failed_payment(
         recovery_attempts=attempts,
     )
 
-    # 5. LLM → rule engine fallback
-    decision = await _llm_decide(txn, category, score, attempts)
-    if decision is None:
-        decision = _rule_engine_decide(payment_id, category, score, attempts)
+    # ── Node 4: A/B Route ─────────────────────────────────────────────────────
+    ab_arm = assign_ab_arm(payment_id)
+    logger.info("Txn %s → A/B arm: %s", payment_id, ab_arm)
 
-    # 6. Simulate downstream recovery outcome (realistic ~45% pass rate for demo)
+    # variant → ML + LLM agent;  control → static rule engine only
+    if ab_arm == "variant":
+        decision = await _llm_decide(txn, category, score, attempts, ab_arm)
+        if decision is None:
+            decision = _rule_engine_decide(payment_id, category, score, attempts, ab_arm)
+    else:
+        decision = _rule_engine_decide(payment_id, category, score, attempts, ab_arm)
+
+    # ── Node 5: Discount Guardrail ────────────────────────────────────────────
+    # (already enforced inside _llm_decide; double-check here)
+    if decision.discount_pct > settings.max_discount_pct:
+        logger.warning("Guardrail (outer): capping discount %.1f → 0", decision.discount_pct)
+        decision.discount_pct = 0.0
+
+    # ── Node 6: HITL Gate ─────────────────────────────────────────────────────
+    hitl_reason = _hitl_trigger_reason(
+        amount_paise, decision.discount_pct, score, attempts
+    )
+    if hitl_reason is not None:
+        hitl_id = str(uuid.uuid4())
+        db.enqueue_hitl(
+            hitl_id=hitl_id,
+            transaction_id=payment_id,
+            amount_paise=amount_paise,
+            proposed_action=decision.action.value,
+            proposed_discount=decision.discount_pct,
+            trigger_reason=hitl_reason.value,
+            ml_score=score,
+            ab_arm=ab_arm,
+        )
+        db.update_transaction(payment_id, TransactionStatus.PENDING_APPROVAL.value)
+        db.append_audit_log(
+            payment_id, "PENDING_APPROVAL",
+            f"HITL gate triggered: reason={hitl_reason.value} "
+            f"amount=₹{amount_rupees:.0f} discount={decision.discount_pct:.1f}%",
+            AuditSource.SYSTEM.value, score,
+        )
+        logger.info("Txn %s → HITL queue (hitl_id=%s reason=%s)",
+                    payment_id, hitl_id, hitl_reason.value)
+        return   # pipeline paused — resumes when merchant acts on HITL queue
+
+    # ── Node 7: Dispatch Recovery ─────────────────────────────────────────────
     final_status = decision.new_status
     if decision.new_status == TransactionStatus.ACTION_TRIGGERED:
         recovery_succeeded = random.random() < (0.30 + score * 0.45)
@@ -339,27 +484,40 @@ async def process_failed_payment(
             else TransactionStatus.RECOVERING
         )
 
-    # 7. Persist results
-    db.update_transaction(payment_id, final_status.value, failure_category=category.value, recoverability_score=score)
+    db.update_transaction(
+        payment_id, final_status.value,
+        failure_category=category.value,
+        recoverability_score=score,
+    )
     db.increment_attempts(payment_id)
 
-    rationale = (
-        f"[{decision.source.value.upper()}] "
-        f"Category={category.value} | Score={score:.4f} | "
-        f"Action={decision.action.value} | Status={final_status.value} | "
-        f"{decision.reasoning}"
+    # Record A/B outcome
+    db.record_ab_outcome(
+        arm=ab_arm,
+        recovered=(final_status == TransactionStatus.RECOVERED),
+        amount_paise=amount_paise,
     )
 
+    # Create payment link + dispatch notification asynchronously
+    if final_status in (TransactionStatus.ACTION_TRIGGERED, TransactionStatus.RECOVERING):
+        await _create_and_dispatch_link(
+            payment_id, amount_paise, email_redacted, failure_reason
+        )
+
+    # ── Node 8: Cryptographic Log ─────────────────────────────────────────────
+    rationale = (
+        f"[{decision.source.value.upper()}|AB={ab_arm.upper()}] "
+        f"Category={category.value} Score={score:.4f} "
+        f"Action={decision.action.value} Status={final_status.value} "
+        f"Discount={decision.discount_pct:.1f}% | {decision.reasoning}"
+    )
     db.append_audit_log(
-        payment_id,
-        decision.action.value,
-        rationale,
-        decision.source.value,
-        score,
+        payment_id, decision.action.value, rationale,
+        decision.source.value, score,
     )
 
     logger.info(
-        "Txn %s complete: category=%s score=%.4f action=%s status=%s via %s",
-        payment_id, category.value, score,
+        "Txn %s DONE: arm=%s category=%s score=%.4f action=%s status=%s via %s",
+        payment_id, ab_arm, category.value, score,
         decision.action.value, final_status.value, decision.source.value,
     )

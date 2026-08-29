@@ -21,10 +21,12 @@ class TransactionStatus(str, Enum):
     ML_SCORED         = "ML_SCORED"
     LOW_PRIORITY_SKIP = "LOW_PRIORITY_SKIP"
     AGENT_EVALUATED   = "AGENT_EVALUATED"
+    PENDING_APPROVAL  = "PENDING_APPROVAL"   # HITL: awaiting merchant sign-off
     ACTION_TRIGGERED  = "ACTION_TRIGGERED"
     RECOVERING        = "RECOVERING"
     RECOVERED         = "RECOVERED"
     EXPIRED           = "EXPIRED"
+    REJECTED          = "REJECTED"           # HITL: merchant rejected the action
 
 
 class FailureCategory(str, Enum):
@@ -153,6 +155,8 @@ class RecoveryAction(BaseModel):
     discount_pct: float = 0.0                  # Guardrail enforces ≤ 15%
     new_status: TransactionStatus
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    ab_arm: str = ""                            # "control" | "variant" | ""
+    hitl_required: bool = False                 # set True by HITL gating logic
 
     @field_validator("discount_pct")
     @classmethod
@@ -172,6 +176,49 @@ class AuditEntry(BaseModel):
     recoverability_score: float
     previous_hash: str
     current_hash: str
+
+
+# ── HITL Approval Models ──────────────────────────────────────────────────────
+
+class HITLTriggerReason(str, Enum):
+    HIGH_VALUE      = "HIGH_VALUE"           # amount > ₹50,000
+    HIGH_DISCOUNT   = "HIGH_DISCOUNT"        # proposed discount > 10%
+    REPEATED_FAIL   = "REPEATED_FAIL"        # 3+ prior attempts
+    FRAUD_SIGNAL    = "FRAUD_SIGNAL"         # velocity / pattern flag
+    VIP_CUSTOMER    = "VIP_CUSTOMER"         # flagged merchant tier
+    AMBIGUOUS_SCORE = "AMBIGUOUS_SCORE"      # ML score 0.40–0.60
+
+
+class HITLDecision(str, Enum):
+    APPROVED        = "APPROVED"
+    REJECTED        = "REJECTED"
+    MODIFIED        = "MODIFIED"            # approved with changed discount
+    ESCALATED       = "ESCALATED"           # pushed to senior agent
+
+
+class HITLQueueItem(BaseModel):
+    hitl_id:          str = Field(default_factory=lambda: str(__import__("uuid").uuid4()))
+    transaction_id:   str
+    amount_paise:     int
+    proposed_action:  str
+    proposed_discount: float = 0.0
+    trigger_reason:   HITLTriggerReason
+    ml_score:         float
+    created_at:       str = ""
+    decided_at:       str = ""
+    decision:         Optional[HITLDecision] = None
+    decided_by:       str = ""              # agent / merchant ID
+    override_discount: Optional[float] = None
+    notes:            str = ""
+    ab_arm:           str = ""              # "control" | "variant"
+
+
+class HITLDecisionRequest(BaseModel):
+    hitl_id:          str
+    decision:         HITLDecision
+    decided_by:       str = "merchant"
+    override_discount: Optional[float] = Field(default=None, ge=0.0, le=15.0)
+    notes:            str = ""
 
 
 # ── API Response Models ───────────────────────────────────────────────────────

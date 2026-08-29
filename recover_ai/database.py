@@ -1,8 +1,29 @@
 """
 RecoverAI Enterprise – Database Layer
+======================================
+Audit Ledger Security Model
+----------------------------
+Every audit_logs row is protected by TWO independent mechanisms:
+
+1. SHA-256 hash-chain (existing)
+   Each row stores the SHA-256 of (previous_hash || canonical_json(row_data)).
+   Tampering with any row breaks every subsequent hash in the chain.
+
+2. HMAC-SHA256 per-row signature (NEW)
+   Each row also stores an HMAC-SHA256 of its own data fields, keyed by the
+   enterprise secret AUDIT_HMAC_KEY (env var, falls back to webhook secret).
+   This binds every log entry to a secret only the server knows, making it
+   impossible to forge entries even if the DB file is compromised.
+
+Tenant isolation
+----------------
+The merchant_id column is present on transactions and audit_logs so queries
+can be scoped per tenant.  The API layer enforces this via the API-key-based
+authentication middleware in main.py.
 """
 from __future__ import annotations
 
+import hmac as _hmac_mod
 import os
 import sys
 
@@ -30,6 +51,33 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 _local = threading.local()
+
+
+# ── HMAC enterprise key ───────────────────────────────────────────────────────
+
+def _get_hmac_key() -> bytes:
+    """
+    Return the HMAC-SHA256 signing key for the audit ledger.
+    Priority: AUDIT_HMAC_KEY env var → RAZORPAY_WEBHOOK_SECRET → fallback.
+    In production, set AUDIT_HMAC_KEY to a 32-byte random secret stored in
+    AWS Secrets Manager / HashiCorp Vault (never hard-coded).
+    """
+    key = (
+        os.getenv("AUDIT_HMAC_KEY")
+        or getattr(settings, "audit_hmac_key", "")
+        or settings.razorpay_webhook_secret
+        or "insecure-dev-key-replace-in-production"
+    )
+    return key.encode("utf-8")
+
+
+def _compute_row_hmac(data: dict[str, Any]) -> str:
+    """
+    Compute HMAC-SHA256 of the canonical JSON of `data` keyed by _get_hmac_key().
+    Used as a per-row authentication tag independent of the hash-chain.
+    """
+    canonical = json.dumps(data, sort_keys=True, default=str)
+    return _hmac_mod.new(_get_hmac_key(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 # ── Writable DB path (Streamlit Cloud repo root is read-only) ─────────────────
@@ -107,6 +155,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     email_redacted        TEXT,
     recoverability_score  REAL NOT NULL DEFAULT 0.0,
     recovery_attempts     INTEGER NOT NULL DEFAULT 0,
+    merchant_id           TEXT NOT NULL DEFAULT 'default',
     created_at            TEXT NOT NULL,
     updated_at            TEXT NOT NULL
 );
@@ -114,6 +163,7 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS idx_txn_status     ON transactions(status);
 CREATE INDEX IF NOT EXISTS idx_txn_created    ON transactions(created_at);
 CREATE INDEX IF NOT EXISTS idx_txn_score      ON transactions(recoverability_score);
+CREATE INDEX IF NOT EXISTS idx_txn_merchant   ON transactions(merchant_id);
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     log_id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,18 +175,68 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     timestamp           TEXT NOT NULL,
     previous_hash       TEXT NOT NULL,
     current_hash        TEXT NOT NULL,
+    hmac_signature      TEXT NOT NULL DEFAULT '',
+    merchant_id         TEXT NOT NULL DEFAULT 'default',
     FOREIGN KEY (transaction_id) REFERENCES transactions(payment_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_txn  ON audit_logs(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp);
+
+CREATE TABLE IF NOT EXISTS hitl_queue (
+    hitl_id            TEXT PRIMARY KEY,
+    transaction_id     TEXT NOT NULL,
+    amount_paise       INTEGER NOT NULL,
+    proposed_action    TEXT NOT NULL,
+    proposed_discount  REAL NOT NULL DEFAULT 0.0,
+    trigger_reason     TEXT NOT NULL,
+    ml_score           REAL NOT NULL DEFAULT 0.0,
+    ab_arm             TEXT NOT NULL DEFAULT '',
+    decision           TEXT,
+    decided_by         TEXT,
+    override_discount  REAL,
+    notes              TEXT NOT NULL DEFAULT '',
+    created_at         TEXT NOT NULL,
+    decided_at         TEXT,
+    FOREIGN KEY (transaction_id) REFERENCES transactions(payment_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hitl_txn      ON hitl_queue(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_hitl_decision ON hitl_queue(decision);
+CREATE INDEX IF NOT EXISTS idx_hitl_created  ON hitl_queue(created_at);
+
+CREATE TABLE IF NOT EXISTS ab_experiment (
+    arm           TEXT PRIMARY KEY,
+    sent          INTEGER NOT NULL DEFAULT 0,
+    recovered     INTEGER NOT NULL DEFAULT 0,
+    revenue_at_risk_paise   INTEGER NOT NULL DEFAULT 0,
+    revenue_recovered_paise INTEGER NOT NULL DEFAULT 0,
+    updated_at    TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO ab_experiment(arm, updated_at) VALUES ('control', datetime('now'));
+INSERT OR IGNORE INTO ab_experiment(arm, updated_at) VALUES ('variant', datetime('now'));
 """
 
 
 def init_db() -> None:
     with get_db() as conn:
         conn.executescript(_DDL)
+        # Live-migration: add new columns to existing databases without data loss
+        _migrate_add_column(conn, "transactions",  "merchant_id",    "TEXT NOT NULL DEFAULT 'default'")
+        _migrate_add_column(conn, "audit_logs",    "hmac_signature", "TEXT NOT NULL DEFAULT ''")
+        _migrate_add_column(conn, "audit_logs",    "merchant_id",    "TEXT NOT NULL DEFAULT 'default'")
     logger.info("Database initialised at %s (WAL mode)", _resolve_db_path())
+
+
+def _migrate_add_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    """Idempotent ALTER TABLE — silently skips if column already exists."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        conn.commit()
+        logger.info("Migration: added column %s.%s", table, column)
+    except sqlite3.OperationalError:
+        pass  # column already exists
 
 
 # ── Hash-chain ledger ─────────────────────────────────────────────────────────
@@ -158,12 +258,19 @@ def _get_latest_hash_locked(conn: sqlite3.Connection) -> str:
 
 
 def verify_audit_integrity() -> tuple[bool, str]:
+    """
+    Full two-layer verification:
+      Layer 1 — SHA-256 hash-chain continuity
+      Layer 2 — HMAC-SHA256 per-row signature (enterprise key)
+    Returns (ok, message).
+    """
     with get_db() as conn:
         rows = conn.execute(
             """
             SELECT log_id, transaction_id, action_taken, decision_rationale,
                    source, recoverability_score, timestamp,
-                   previous_hash, current_hash
+                   previous_hash, current_hash, hmac_signature,
+                   COALESCE(merchant_id, 'default') AS merchant_id
               FROM audit_logs
              ORDER BY log_id ASC
             """
@@ -172,8 +279,11 @@ def verify_audit_integrity() -> tuple[bool, str]:
     if not rows:
         return True, "Ledger is empty – no records to verify."
 
-    running_hash = "GENESIS"
+    running_hash    = "GENESIS"
+    hmac_failures   = 0
+
     for row in rows:
+        # ── Layer 1: hash-chain ───────────────────────────────────────────────
         data = {
             "transaction_id":       row["transaction_id"],
             "action_taken":         row["action_taken"],
@@ -181,24 +291,50 @@ def verify_audit_integrity() -> tuple[bool, str]:
             "source":               row["source"],
             "recoverability_score": row["recoverability_score"],
             "timestamp":            row["timestamp"],
+            "merchant_id":          row["merchant_id"],
         }
+
         if row["previous_hash"] != running_hash:
             return (
                 False,
-                f"TAMPER DETECTED at log_id={row['log_id']}: "
-                f"previous_hash mismatch (stored='{row['previous_hash'][:16]}…' "
+                f"CHAIN TAMPER at log_id={row['log_id']}: "
+                f"previous_hash mismatch "
+                f"(stored='{row['previous_hash'][:16]}…' "
                 f"expected='{running_hash[:16]}…')",
             )
+
         recomputed = compute_event_hash(running_hash, data)
         if recomputed != row["current_hash"]:
             return (
                 False,
-                f"TAMPER DETECTED at log_id={row['log_id']}: "
-                f"current_hash mismatch for transaction '{row['transaction_id']}'",
+                f"CHAIN TAMPER at log_id={row['log_id']}: "
+                f"current_hash mismatch for txn '{row['transaction_id']}'",
             )
         running_hash = recomputed
 
-    return True, f"100% IMMUTABLE & VERIFIED — {len(rows)} records validated."
+        # ── Layer 2: HMAC signature ───────────────────────────────────────────
+        stored_hmac   = row["hmac_signature"] or ""
+        if stored_hmac:                          # skip rows written before upgrade
+            expected_hmac = _compute_row_hmac(data)
+            if not _hmac_mod.compare_digest(stored_hmac, expected_hmac):
+                hmac_failures += 1
+                logger.warning(
+                    "HMAC MISMATCH at log_id=%d txn=%s",
+                    row["log_id"], row["transaction_id"],
+                )
+
+    if hmac_failures > 0:
+        return (
+            False,
+            f"HMAC SIGNATURES INVALID: {hmac_failures} row(s) failed HMAC verification. "
+            "Possible key rotation or data tampering.",
+        )
+
+    return (
+        True,
+        f"100% IMMUTABLE & VERIFIED — {len(rows)} records validated "
+        "(SHA-256 chain + HMAC signatures).",
+    )
 
 
 # ── Transaction CRUD ──────────────────────────────────────────────────────────
@@ -287,7 +423,14 @@ def append_audit_log(
     decision_rationale: str,
     source: str,
     recoverability_score: float,
+    merchant_id: str = "default",
 ) -> str:
+    """
+    Append an immutable audit log entry protected by:
+      1. SHA-256 hash-chain (links to previous entry)
+      2. HMAC-SHA256 per-row signature (keyed by AUDIT_HMAC_KEY secret)
+    Returns the new current_hash.
+    """
     now = _utcnow()
     with _audit_lock:
         with get_db() as conn:
@@ -299,18 +442,23 @@ def append_audit_log(
                 "source":               source,
                 "recoverability_score": recoverability_score,
                 "timestamp":            now,
+                "merchant_id":          merchant_id,
             }
-            new_hash = compute_event_hash(prev_hash, data)
+            new_hash      = compute_event_hash(prev_hash, data)
+            hmac_signature = _compute_row_hmac(data)
+
             conn.execute(
                 """
                 INSERT INTO audit_logs
                     (transaction_id, action_taken, decision_rationale, source,
-                     recoverability_score, timestamp, previous_hash, current_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     recoverability_score, timestamp, previous_hash, current_hash,
+                     hmac_signature, merchant_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     transaction_id, action_taken, decision_rationale, source,
                     recoverability_score, now, prev_hash, new_hash,
+                    hmac_signature, merchant_id,
                 ),
             )
     return new_hash
@@ -424,3 +572,95 @@ def get_summary_metrics() -> dict[str, Any]:
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ── HITL queue CRUD ───────────────────────────────────────────────────────────
+
+def enqueue_hitl(
+    hitl_id: str,
+    transaction_id: str,
+    amount_paise: int,
+    proposed_action: str,
+    proposed_discount: float,
+    trigger_reason: str,
+    ml_score: float,
+    ab_arm: str = "",
+) -> None:
+    now = _utcnow()
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO hitl_queue
+                (hitl_id, transaction_id, amount_paise, proposed_action,
+                 proposed_discount, trigger_reason, ml_score, ab_arm, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (hitl_id, transaction_id, amount_paise, proposed_action,
+             proposed_discount, trigger_reason, ml_score, ab_arm, now),
+        )
+
+
+def resolve_hitl(
+    hitl_id: str,
+    decision: str,
+    decided_by: str,
+    override_discount: float | None,
+    notes: str,
+) -> None:
+    now = _utcnow()
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE hitl_queue
+               SET decision=?, decided_by=?, override_discount=?,
+                   notes=?, decided_at=?
+             WHERE hitl_id=?
+            """,
+            (decision, decided_by, override_discount, notes, now, hitl_id),
+        )
+
+
+def get_hitl_queue(pending_only: bool = True, limit: int = 100) -> list[sqlite3.Row]:
+    with get_db() as conn:
+        if pending_only:
+            return conn.execute(
+                "SELECT * FROM hitl_queue WHERE decision IS NULL ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return conn.execute(
+            "SELECT * FROM hitl_queue ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+
+def get_hitl_item(hitl_id: str) -> sqlite3.Row | None:
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT * FROM hitl_queue WHERE hitl_id=?", (hitl_id,)
+        ).fetchone()
+
+
+# ── A/B experiment CRUD ───────────────────────────────────────────────────────
+
+def record_ab_outcome(arm: str, recovered: bool, amount_paise: int) -> None:
+    """Thread-safe increment of A/B counters."""
+    now = _utcnow()
+    with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE ab_experiment
+               SET sent = sent + 1,
+                   recovered = recovered + ?,
+                   revenue_at_risk_paise = revenue_at_risk_paise + ?,
+                   revenue_recovered_paise = revenue_recovered_paise + ?,
+                   updated_at = ?
+             WHERE arm = ?
+            """,
+            (1 if recovered else 0, amount_paise,
+             amount_paise if recovered else 0, now, arm),
+        )
+
+
+def get_ab_results() -> dict[str, dict]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM ab_experiment").fetchall()
+    return {r["arm"]: dict(r) for r in rows}

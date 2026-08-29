@@ -1,30 +1,50 @@
-# RecoverAI Enterprise – Streamlit Cloud Dependencies
+# RecoverAI Enterprise – Unified Dependency Manifest
+# =====================================================
+# Streamlit Cloud uses Python 3.14 which has no pre-built wheels for hard-pinned
+# packages; lower-bound ranges let pip/uv resolve compatible wheels automatically.
 #
-# Python 3.14 (used by Streamlit Cloud) has no pre-built wheels for many
-# pinned packages. We use minimum-version lower bounds so pip/uv can pick
-# the newest wheel that actually supports Python 3.14.
-#
-# Packages intentionally excluded:
-#   - streamlit-autorefresh  → incompatible with streamlit>=1.33, replaced
-#                               with native st.rerun() in app.py
-#   - fastapi / uvicorn / httpx  → not needed by the dashboard
+# Split into two logical groups:
+#   [dashboard]  — Streamlit Cloud needs only this group
+#   [api]        — FastAPI server needs api + ml groups
+#   [ml]         — shared ML pipeline
+#   [dev]        — local dev + CI tooling (not installed in production images)
 
-# ── Settings & Validation ─────────────────────────────────────────────────────
+# ── Core: Settings & validation ───────────────────────────────────────────────
 pydantic>=2.9.0
 pydantic-settings>=2.6.0
 
-# ── Dashboard ─────────────────────────────────────────────────────────────────
+# ── Dashboard (Streamlit Cloud) ───────────────────────────────────────────────
 streamlit>=1.40.0
 plotly>=5.20.0
 pandas>=2.0.0
-
-# ── Image handling ────────────────────────────────────────────────────────────
 Pillow>=10.0.0
 
-# ── ML Pipeline ───────────────────────────────────────────────────────────────
+# ── FastAPI stack ─────────────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+httpx>=0.27.0
+
+# ── Observability ─────────────────────────────────────────────────────────────
+# prometheus-fastapi-instrumentator: Prometheus metrics for FastAPI
+# prometheus-client: pulled as transitive dep; pinned floor for Python 3.14 compat
+prometheus-fastapi-instrumentator>=6.1.0
+prometheus-client>=0.20.0
+
+# ── ML pipeline ───────────────────────────────────────────────────────────────
 scikit-learn>=1.3.0
 lightgbm>=4.0.0
 numpy>=1.26.0
+# scipy: used by KS drift test; optional — scorer falls back to pure-Python impl
+scipy>=1.11.0
 
 # ── Resilience ────────────────────────────────────────────────────────────────
 tenacity>=8.0.0
+
+# ── Security ──────────────────────────────────────────────────────────────────
+# cryptography: future Vault / JWT integration; safe to keep floor-pinned
+cryptography>=42.0.0
+
+# ── Dev / CI tooling (install with: pip install -r requirements.txt -r requirements-dev.txt) ──
+# Kept separate so production images stay lean.
+# See requirements-dev.txt
