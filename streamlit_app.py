@@ -15,6 +15,7 @@ Tabs:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -103,6 +104,16 @@ with st.sidebar:
     if st.button("🔄 Force Refresh", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+    live_feed = st.toggle(
+        "📡 Live transaction feed",
+        value=True,
+        help="Generate one live-format failed payment on each refresh and run it through the recovery pipeline.",
+    )
+    refresh_seconds = st.slider(
+        "Refresh interval (seconds)", min_value=2, max_value=60,
+        value=max(2, min(60, int(_settings.dashboard_refresh_seconds))),
+        disabled=not live_feed,
+    )
     st.divider()
     st.caption(f"**DB:** `{_settings.database_path}`")
     st.caption(f"**ML threshold:** {_settings.ml_low_priority_threshold}")
@@ -121,6 +132,45 @@ def _kpi(col, label, value, sub, colour="#ffffff"):
 
 def _tag(text, color):
     return f'<span class="tag" style="background:{color}22;color:{color};border:1px solid {color}">{text}</span>'
+
+# ── Live transaction feed ───────────────────────────────────────────────────────
+def _live_transaction_payload() -> dict[str, str | int | None]:
+    """Create a Razorpay-shaped failed payment for the local live demo feed."""
+    failure_code, failure_reason = random.choice([
+        ("GATEWAY_ERROR", "bank_downtime"),
+        ("NETWORK_TIMEOUT", "upstream_timeout"),
+        ("INSUFFICIENT_FUNDS", "low_balance"),
+        ("CARD_DECLINED", "issuer_declined"),
+        ("INVALID_CARD", "invalid_details"),
+        ("PAYMENT_CANCELLED", "user_cancelled"),
+    ])
+    return {
+        "payment_id": f"pay_live_{uuid.uuid4().hex[:12]}",
+        "order_id": f"order_live_{uuid.uuid4().hex[:12]}",
+        "amount_paise": random.randint(50000, 1500000),
+        "currency": "INR",
+        "failure_code": failure_code,
+        "failure_reason": failure_reason,
+        "email_redacted": "live_user***@example.com",
+    }
+
+
+def _ingest_live_transaction() -> None:
+    """Run one live-format event through the same pipeline used by the API."""
+    from agent_engine import process_failed_payment
+    payload = _live_transaction_payload()
+    asyncio.run(process_failed_payment(**payload))
+    st.cache_data.clear()
+
+
+if live_feed:
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=refresh_seconds * 1000, key="recoverai_live_refresh")
+    try:
+        _ingest_live_transaction()
+    except Exception as exc:
+        st.warning(f"Live feed paused: {exc}")
+
 
 # ── Cached loaders ────────────────────────────────────────────────────────────
 @st.cache_data(ttl=60)

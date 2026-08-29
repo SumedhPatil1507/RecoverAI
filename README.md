@@ -194,10 +194,14 @@ streamlit run streamlit_app.py
 # → Opens at http://localhost:8501
 ```
 
-### 5 — Send Events (Terminal 3)
+The dashboard now starts with **Live transaction feed enabled**. Every refresh creates one Razorpay-shaped failed payment, sends it through the existing ML → root-cause → recovery pipeline, and refreshes the KPI cards, failure breakdown, funnel, and time-series. Use the sidebar toggle to pause the feed or change the refresh interval. This makes the dashboard self-contained on Streamlit Cloud; it no longer depends on a separately running API or simulator just to populate the charts.
+
+### 5 — Optional external webhook simulator (Terminal 3)
+
+The external simulator remains available for testing the FastAPI webhook endpoint and HMAC verification:
 
 ```bash
-# Burst-seed 50 events immediately (best for demo)
+# Burst-seed 50 events immediately (best for API demo)
 python recover_ai/data_simulator.py --burst 50
 
 # Continuous stream (one event every 5 seconds)
@@ -209,6 +213,8 @@ python recover_ai/data_simulator.py --count 100 --interval 2
 # Single live-format integration test
 python recover_ai/data_simulator.py --live
 ```
+
+To use only real webhook traffic, turn **Live transaction feed** off in the sidebar and run the API plus simulator separately.
 
 ---
 
@@ -241,7 +247,7 @@ WEBHOOK_BASE_URL          = "https://your-api.onrender.com"
 DASHBOARD_REFRESH_SECONDS = "5"
 ```
 
-> `OPENAI_API_KEY` can be left blank — the deterministic rule engine handles classification for free.
+> `OPENAI_API_KEY` can be left blank — the deterministic rule engine handles classification for free. The dashboard's built-in live feed also works without an OpenAI key and uses synthetic Razorpay-shaped test events; connect a production webhook endpoint before treating the displayed data as operational payment data.
 
 ---
 
