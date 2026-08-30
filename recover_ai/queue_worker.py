@@ -18,6 +18,14 @@ from config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+try:
+    from celery import Celery
+    celery_app = Celery("recover_ai", broker=os.getenv("REDIS_URL", "redis://localhost:6379/0"), backend=os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+    CELERY_AVAILABLE = True
+except ImportError:
+    celery_app = None
+    CELERY_AVAILABLE = False
+
 
 # ── Job definition ────────────────────────────────────────────────────────────
 
@@ -41,11 +49,21 @@ def get_queue() -> "asyncio.Queue[PaymentJob | None]":
     return _queue
 
 
+if CELERY_AVAILABLE:
+    @celery_app.task(name="recover_ai.process_payment")
+    def process_payment_task(payload: dict) -> None:
+        from agent_engine import process_failed_payment
+        asyncio.run(process_failed_payment(**payload))
+
+
 async def enqueue(job: PaymentJob) -> bool:
     """
     Non-blocking enqueue. Returns False if queue is full (backpressure signal).
     """
     try:
+        if CELERY_AVAILABLE and os.getenv("USE_CELERY", "0") == "1":
+            process_payment_task.delay({"payment_id": job.payment_id, "order_id": job.order_id, "amount_paise": job.amount_paise, "currency": job.currency, "failure_code": job.failure_code, "failure_reason": job.failure_reason, "email_redacted": job.email_redacted})
+            return True
         _queue.put_nowait(job)
         return True
     except asyncio.QueueFull:

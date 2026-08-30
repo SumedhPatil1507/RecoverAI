@@ -577,3 +577,30 @@ The following sources support the README's externally verifiable statements abou
 | [16] | [Prophet documentation](https://facebook.github.io/prophet/) | Optional time-series forecasting implementation used by the anomaly service when installed. |
 
 *RecoverAI Enterprise v2.0.0 · Razorpay AI Buildathon Track 03*
+
+
+## Enterprise updates and Streamlit deployment
+
+The root `streamlit_app.py` is the Streamlit Cloud entry point. Run it locally with `streamlit run streamlit_app.py`; run the API with `uvicorn recover_ai.main:app --reload`. The dashboard works without provider credentials because Razorpay links and WhatsApp dispatch use mock fallbacks.
+
+Transactions above **₹50,000** or with a proposed discount above **10%** enter `PENDING_APPROVAL`. Merchants can approve, modify, or reject items in the **Agent Overrides & HITL Queue** panel. Audit integrity is available at `/api/audit/verify`.
+
+| Configuration | Purpose |
+|---|---|
+| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Enable real Razorpay payment links. |
+| `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_ID` | Enable WhatsApp Business dispatch. |
+| `RAZORPAY_WEBHOOK_SECRET` | Verify incoming webhook HMAC signatures. |
+| `AUDIT_HMAC_KEY` | Sign audit entries independently. |
+| `TENANT_API_KEYS` | Optional comma-separated `merchant_id:api_key` tenant credentials. |
+| `USE_CELERY`, `REDIS_URL` | Route jobs to the optional distributed Celery/Redis queue. |
+
+For Streamlit Community Cloud, set the repository branch to `main` and the main file path to `streamlit_app.py`. For distributed deployment, set `USE_CELERY=1`, provide `REDIS_URL`, and run `celery -A recover_ai.queue_worker.celery_app worker --loglevel=INFO`. Without Celery/Redis, the built-in asyncio worker remains the local fallback.
+
+Validate the repository with `python -m pytest -q`. The enterprise tests cover HMAC authentication, PII masking, HITL transitions, audit hash-chain verification, and async mock integrations.
+
+### References
+
+[1]: https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app "Streamlit Community Cloud deployment documentation"
+[2]: https://razorpay.com/docs/api/payments/payment-links/ "Razorpay Payment Links API"
+[3]: https://developers.facebook.com/docs/whatsapp/cloud-api/overview "WhatsApp Cloud API overview"
+[4]: https://docs.celeryq.dev/en/stable/getting-started/backends-and-brokers/redis.html "Celery Redis broker documentation"

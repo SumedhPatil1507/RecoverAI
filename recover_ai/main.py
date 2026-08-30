@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hmac
 import logging
 import os
 import sys
@@ -68,6 +69,26 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# ── Tenant API-key authentication ─────────────────────────────────────────────
+def _tenant_keys() -> dict[str, str]:
+    raw = settings.tenant_api_keys or os.getenv("TENANT_API_KEYS", "")
+    return {pair.split(":", 1)[0]: pair.split(":", 1)[1] for pair in raw.split(",") if ":" in pair}
+
+
+@app.middleware("http")
+async def _tenant_auth(request: Request, call_next):
+    keys = _tenant_keys()
+    if keys and request.url.path.startswith("/api/"):
+        supplied = request.headers.get("X-API-Key", "")
+        merchant = next((mid for mid, key in keys.items() if hmac.compare_digest(key, supplied)), None)
+        if merchant is None:
+            return JSONResponse(status_code=401, content={"detail": "Invalid tenant API key"})
+        request.state.merchant_id = merchant
+    else:
+        request.state.merchant_id = request.headers.get("X-Merchant-ID", "default")
+    return await call_next(request)
+
 
 # ── Prometheus instrumentation ────────────────────────────────────────────────
 try:

@@ -56,3 +56,7 @@ cryptography>=42.0.0
 # ── Dev / CI tooling (install with: pip install -r requirements.txt -r requirements-dev.txt) ──
 # Kept separate so production images stay lean.
 # See requirements-dev.txt
+
+# Optional distributed task queue (enable with USE_CELERY=1)
+celery>=5.4.0
+redis>=5.0.0

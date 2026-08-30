@@ -62,6 +62,9 @@ if _PYDANTIC_V2:
         # ── Database ──────────────────────────────────────────────────────────
         # Use platform-appropriate temp directory (Windows: %TEMP%, Linux/Mac: /tmp)
         database_path: str = "recover_ai_enterprise.db"
+        postgres_dsn: str = ""
+        tenant_api_keys: str = ""
+        audit_hmac_key: str = ""
 
         # ── LLM / AI ──────────────────────────────────────────────────────────
         openai_api_key: str = Field(default="", description="Leave blank → rule engine only")
@@ -108,6 +111,9 @@ else:
         environment: str = "development"
         razorpay_webhook_secret: str = "dev_secret_replace_in_production"
         database_path: str = "recover_ai_enterprise.db"
+        postgres_dsn: str = ""
+        tenant_api_keys: str = ""
+        audit_hmac_key: str = ""
         openai_api_key: str = ""
         llm_model: str = "gpt-4o-mini"
         llm_timeout_seconds: float = 3.0
