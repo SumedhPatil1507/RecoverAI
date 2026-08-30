@@ -1061,7 +1061,7 @@ with tab9:
             for feature, value in exp["contributions"].items():
                 bee_rows.append({"feature": feature, "contribution": value, "payment_id": exp.get("payment_id", "")})
         bee_df = pd.DataFrame(bee_rows)
-        fig_bee = go.Figure(go.Box(x=bee_df["contribution"], y=bee_df["feature"], orientation="h", points="all", customdata=bee_df[["payment_id"]], hovertemplate="%{y}<br>Contribution: %{x:.4f}<br>Payment: %{customdata[0]}<extra></extra>", marker_color=C["purple"]))
+        fig_bee = go.Figure(go.Box(x=bee_df["contribution"], y=bee_df["feature"], orientation="h", boxpoints="all", customdata=bee_df[["payment_id"]], hovertemplate="%{y}<br>Contribution: %{x:.4f}<br>Payment: %{customdata[0]}<extra></extra>", marker_color=C["purple"]))
         fig_bee.update_layout(**_PL, title="Contribution distribution", xaxis_title="Contribution to score", yaxis_title="Feature", height=420)
         st.plotly_chart(fig_bee, use_container_width=True, config={"displaylogo": False})
 
