@@ -609,3 +609,21 @@ Validate the repository with `python -m pytest -q`. The enterprise tests cover H
 ### Interactive visualization standard
 
 All plots rendered by the Streamlit dashboard use `st.plotly_chart` and Plotly traces. Static Streamlit chart primitives and `st.pyplot` are not used in the visible dashboard. Charts support hover tooltips, zoom and pan, legend toggling, and the Plotly modebar for interactive exploration.
+
+
+### Streamlit alert configuration
+
+The anomaly-alert panel now reads credentials from Streamlit Cloud Secrets first (and environment variables as a fallback), so hosted deployments do not require a local `.env` file. In Streamlit Cloud, open **Manage app → Settings → Secrets**, paste the following TOML with real values, save it, and reboot the app:
+
+```toml
+SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/T.../B.../..."
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 587
+SMTP_TLS = "true"
+SMTP_USER = "alerts@example.com"
+SMTP_PASSWORD = "provider-app-password"
+ALERT_EMAIL_FROM = "alerts@example.com"
+ALERT_EMAIL_TO = "recipient@example.com"
+```
+
+The **Alert channel configuration** expander shows whether each channel is detected without revealing secret values. Slack uses the incoming webhook URL. Email uses authenticated SMTP when `SMTP_USER` is present; for Gmail or other providers, use an app password rather than a normal account password. Delivery cannot be completed with placeholder values, so the dashboard reports provider failures separately from missing configuration.

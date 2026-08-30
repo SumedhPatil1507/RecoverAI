@@ -66,3 +66,28 @@ def test_signed_webhook_ack():
     assert response.json()["payment_id"] == "pay_api"
     with TestClient(app) as client:
         assert client.get("/api/audit/verify").status_code == 200
+
+
+def test_alert_settings_and_provider_dispatch(monkeypatch):
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/example")
+    monkeypatch.setenv("SMTP_HOST", "smtp.test")
+    monkeypatch.setenv("ALERT_EMAIL_TO", "owner@example.com")
+    monkeypatch.setenv("ALERT_EMAIL_FROM", "alerts@example.com")
+    monkeypatch.setenv("SMTP_TLS", "false")
+    import anomaly_detection as alerts
+    assert alerts.alert_configuration() == {"slack": True, "email": True}
+
+    class SlackResponse:
+        ok = True
+
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: SlackResponse())
+    assert alerts.send_slack_alert("test") is True
+
+    class FakeSMTP:
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def send_message(self, message): self.message = message
+
+    monkeypatch.setattr(alerts.smtplib, "SMTP", FakeSMTP)
+    assert alerts.send_email_alert("subject", "body") is True

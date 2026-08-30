@@ -38,7 +38,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from anomaly_detection import detect as detect_anomalies, forecast as forecast_anomalies
+from anomaly_detection import alert_configuration, detect as detect_anomalies, forecast as forecast_anomalies
 from explainability import beeswarm_figure, export_pdf, explain_transaction, feature_importance, waterfall_figure
 from experimentation import choose_strategy, record as record_experiment, report as experiment_report
 from merchant_copilot import answer as copilot_answer, stream_text, suggested_questions
@@ -1117,6 +1117,14 @@ with tab12:
     st.markdown("## 🚨 Revenue Anomaly Detection Agent")
     anomaly_rows = [dict(row) for row in _db.get_all_transactions(1000)]
     anomaly_result = detect_anomalies(anomaly_rows)
+    alert_cfg = alert_configuration()
+    with st.expander("Alert channel configuration", expanded=not all(alert_cfg.values())):
+        s1, s2 = st.columns(2)
+        s1.metric("Slack", "Configured" if alert_cfg["slack"] else "Not configured")
+        s2.metric("Email", "Configured" if alert_cfg["email"] else "Not configured")
+        if not all(alert_cfg.values()):
+            st.caption("Add the missing values under Streamlit Cloud → Manage app → Settings → Secrets, then reboot the app.")
+            st.code('SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/..."\nSMTP_HOST = "smtp.gmail.com"\nSMTP_PORT = 587\nSMTP_TLS = "true"\nSMTP_USER = "alerts@example.com"\nSMTP_PASSWORD = "your-app-password"\nALERT_EMAIL_FROM = "alerts@example.com"\nALERT_EMAIL_TO = "recipient@example.com"', language="toml")
     if anomaly_result["anomalies"]:
         st.error(f"Detected {len(anomaly_result['anomalies'])} payment-failure anomaly window(s).")
         st.dataframe(pd.DataFrame(anomaly_result["anomalies"]), use_container_width=True)
@@ -1125,13 +1133,14 @@ with tab12:
         with ac1:
             if st.button("Send Slack alert", key="send_slack_alert"):
                 from anomaly_detection import send_slack_alert
-                st.success("Slack alert sent." if send_slack_alert(alert_text) else "Slack alert not sent; configure SLACK_WEBHOOK_URL.")
+                sent = send_slack_alert(alert_text)
+                st.success("Slack alert sent." if sent else "Slack alert failed. Check SLACK_WEBHOOK_URL and the webhook response.")
         with ac2:
             if st.button("Send email alert", key="send_email_alert"):
                 from anomaly_detection import send_email_alert
                 try:
                     sent = send_email_alert("RecoverAI revenue anomaly", alert_text)
-                    st.success("Email alert sent." if sent else "Email alert not sent; configure SMTP_HOST and ALERT_EMAIL_TO.")
+                    st.success("Email alert sent." if sent else "Email alert failed. Check SMTP_HOST, SMTP_PORT, SMTP_USER/SMTP_PASSWORD, and ALERT_EMAIL_TO.")
                 except Exception as exc:
                     st.error(f"Email delivery failed: {exc}")
     else:

@@ -75,9 +75,29 @@ def forecast(transactions: list[dict[str, Any]], periods: int = 12) -> pd.DataFr
     return pd.DataFrame({"timestamp": timestamps, "predicted_failures": [baseline] * periods})
 
 
+def _alert_setting(name: str, default: str = "") -> str:
+    """Read alert settings from environment variables or Streamlit Secrets."""
+    value = os.getenv(name, "")
+    if value:
+        return value
+    try:
+        import streamlit as st
+        return str(st.secrets.get(name, default))
+    except Exception:
+        return default
+
+
+def alert_configuration() -> dict[str, bool]:
+    """Report whether alert channels are configured without exposing secrets."""
+    return {
+        "slack": bool(_alert_setting("SLACK_WEBHOOK_URL")),
+        "email": bool(_alert_setting("SMTP_HOST") and _alert_setting("ALERT_EMAIL_TO")),
+    }
+
+
 def send_slack_alert(message: str) -> bool:
     import requests
-    url = os.getenv("SLACK_WEBHOOK_URL", "")
+    url = _alert_setting("SLACK_WEBHOOK_URL")
     if not url:
         return False
     response = requests.post(url, json={"text": message}, timeout=10)
@@ -85,18 +105,19 @@ def send_slack_alert(message: str) -> bool:
 
 
 def send_email_alert(subject: str, body: str) -> bool:
-    host = os.getenv("SMTP_HOST", "")
-    recipient = os.getenv("ALERT_EMAIL_TO", "")
-    sender = os.getenv("ALERT_EMAIL_FROM", recipient)
+    host = _alert_setting("SMTP_HOST")
+    recipient = _alert_setting("ALERT_EMAIL_TO")
+    sender = _alert_setting("ALERT_EMAIL_FROM", recipient)
     if not host or not recipient:
         return False
     msg = EmailMessage()
     msg["Subject"], msg["From"], msg["To"] = subject, sender, recipient
     msg.set_content(body)
-    with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587")), timeout=10) as server:
-        if os.getenv("SMTP_TLS", "true").lower() == "true":
+    with smtplib.SMTP(host, int(_alert_setting("SMTP_PORT", "587")), timeout=10) as server:
+        if _alert_setting("SMTP_TLS", "true").lower() == "true":
             server.starttls()
-        if os.getenv("SMTP_USER"):
-            server.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASSWORD", ""))
+        user = _alert_setting("SMTP_USER")
+        if user:
+            server.login(user, _alert_setting("SMTP_PASSWORD"))
         server.send_message(msg)
     return True
