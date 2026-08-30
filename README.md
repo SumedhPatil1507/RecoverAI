@@ -604,3 +604,8 @@ Validate the repository with `python -m pytest -q`. The enterprise tests cover H
 [2]: https://razorpay.com/docs/api/payments/payment-links/ "Razorpay Payment Links API"
 [3]: https://developers.facebook.com/docs/whatsapp/cloud-api/overview "WhatsApp Cloud API overview"
 [4]: https://docs.celeryq.dev/en/stable/getting-started/backends-and-brokers/redis.html "Celery Redis broker documentation"
+
+
+### Interactive visualization standard
+
+All plots rendered by the Streamlit dashboard use `st.plotly_chart` and Plotly traces. Static Streamlit chart primitives and `st.pyplot` are not used in the visible dashboard. Charts support hover tooltips, zoom and pan, legend toggling, and the Plotly modebar for interactive exploration.

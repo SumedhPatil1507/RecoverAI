@@ -1043,14 +1043,27 @@ with tab9:
         e2.metric("Recommended action", explanation["action"])
         e3.metric("Root cause", selected.get("failure_category") or "UNKNOWN")
         st.info(explanation["action_reason"])
-        st.pyplot(waterfall_figure(explanation), clear_figure=True)
+        wf = pd.DataFrame({"feature": list(explanation["contributions"].keys()), "contribution": list(explanation["contributions"].values())})
+        fig_wf = go.Figure(go.Bar(x=wf["contribution"], y=wf["feature"], orientation="h", marker_color=[C["green"] if v >= 0 else C["red"] for v in wf["contribution"]], hovertemplate="%{y}<br>Contribution: %{x:.4f}<extra></extra>"))
+        fig_wf.update_layout(**_PL, title=f"Recovery score explanation · {explanation.get('payment_id', 'transaction')}", xaxis_title="Contribution to score", yaxis_title="Feature", height=360)
+        st.plotly_chart(fig_wf, use_container_width=True, config={"displaylogo": False})
         pdf = export_pdf(explanation)
         st.download_button("Download transaction explanation PDF", pdf, file_name=f"recoverai_{selected_id}_explanation.pdf", mime="application/pdf")
         st.markdown("#### Feature importance across transactions")
         imp = feature_importance(explain_rows)
-        st.bar_chart(imp.set_index("feature"), use_container_width=True)
+        fig_imp = go.Figure(go.Bar(x=imp["importance"], y=imp["feature"], orientation="h", marker_color=C["blue"], hovertemplate="%{y}<br>Mean absolute contribution: %{x:.4f}<extra></extra>"))
+        fig_imp.update_layout(**_PL, title="Feature importance", xaxis_title="Mean absolute contribution", yaxis_title="Feature", height=360)
+        st.plotly_chart(fig_imp, use_container_width=True, config={"displaylogo": False})
         st.markdown("#### SHAP-style beeswarm")
-        st.pyplot(beeswarm_figure(explain_rows), clear_figure=True)
+        bee_rows = []
+        for row in explain_rows:
+            exp = explain_transaction(row)
+            for feature, value in exp["contributions"].items():
+                bee_rows.append({"feature": feature, "contribution": value, "payment_id": exp.get("payment_id", "")})
+        bee_df = pd.DataFrame(bee_rows)
+        fig_bee = go.Figure(go.Box(x=bee_df["contribution"], y=bee_df["feature"], orientation="h", points="all", customdata=bee_df[["payment_id"]], hovertemplate="%{y}<br>Contribution: %{x:.4f}<br>Payment: %{customdata[0]}<extra></extra>", marker_color=C["purple"]))
+        fig_bee.update_layout(**_PL, title="Contribution distribution", xaxis_title="Contribution to score", yaxis_title="Feature", height=420)
+        st.plotly_chart(fig_bee, use_container_width=True, config={"displaylogo": False})
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 10 — RECOVERY OPTIMIZATION AGENT
@@ -1092,7 +1105,9 @@ with tab11:
     if report["strategies"]:
         exp_df = pd.DataFrame(report["strategies"])
         st.dataframe(exp_df, use_container_width=True)
-        st.bar_chart(exp_df.set_index("strategy")["recovery_rate"], use_container_width=True)
+        fig_exp = go.Figure(go.Bar(x=exp_df["strategy"], y=exp_df["recovery_rate"], marker_color=C["green"], hovertemplate="%{x}<br>Recovery rate: %{y:.2%}<extra></extra>"))
+        fig_exp.update_layout(**_PL, title="Recovery rate by strategy", xaxis_title="Strategy", yaxis_title="Recovery rate", yaxis_tickformat=".0%", height=360)
+        st.plotly_chart(fig_exp, use_container_width=True, config={"displaylogo": False})
         st.caption("Confidence intervals use a 95% normal approximation; treat early samples as directional rather than conclusive.")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1124,5 +1139,10 @@ with tab12:
     st.markdown("#### Forecasted failure volume")
     forecast_df = forecast_anomalies(anomaly_rows)
     if not forecast_df.empty:
-        st.line_chart(forecast_df.set_index("timestamp"), use_container_width=True)
+        forecast_long = forecast_df.melt(id_vars=["timestamp"], var_name="series", value_name="value")
+        fig_forecast = go.Figure()
+        for series, group in forecast_long.groupby("series"):
+            fig_forecast.add_trace(go.Scatter(x=group["timestamp"], y=group["value"], mode="lines+markers", name=series.replace("_", " ").title(), hovertemplate="%{x}<br>%{y:.2f}<extra></extra>"))
+        fig_forecast.update_layout(**_PL, title="Forecasted failure volume", xaxis_title="Timestamp", yaxis_title="Failure volume", hovermode="x unified", height=380)
+        st.plotly_chart(fig_forecast, use_container_width=True, config={"displaylogo": False})
     st.caption("Detection combines Isolation Forest when enough observations exist, rolling statistical thresholding, and Prophet when installed.")
