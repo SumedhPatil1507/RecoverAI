@@ -60,8 +60,8 @@ if _PYDANTIC_V2:
         )
 
         # ── Database ──────────────────────────────────────────────────────────
-        # Use platform-appropriate temp directory (Windows: %TEMP%, Linux/Mac: /tmp)
-        database_path: str = "recover_ai_enterprise.db"
+        # /tmp/ is always writable on Streamlit Cloud (repo root is read-only)
+        database_path: str = "/tmp/recover_ai_enterprise.db"
 
         # ── LLM / AI ──────────────────────────────────────────────────────────
         openai_api_key: str = Field(default="", description="Leave blank → rule engine only")
@@ -107,7 +107,7 @@ else:
         app_version: str = "2.0.0"
         environment: str = "development"
         razorpay_webhook_secret: str = "dev_secret_replace_in_production"
-        database_path: str = "recover_ai_enterprise.db"
+        database_path: str = "/tmp/recover_ai_enterprise.db"
         openai_api_key: str = ""
         llm_model: str = "gpt-4o-mini"
         llm_timeout_seconds: float = 3.0

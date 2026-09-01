@@ -55,6 +55,91 @@ def _bootstrap():
 
 _settings, _db = _bootstrap()
 
+
+# ── Demo data seeder ──────────────────────────────────────────────────────────
+def _seed_demo_data(n: int = 60) -> int:
+    """
+    Insert n synthetic failed transactions directly into the DB.
+    Simulates the full ML-score → classify → action → outcome pipeline
+    without needing the FastAPI server running.
+    Returns the number of rows inserted.
+    """
+    import random, uuid, hashlib, hmac as _hmac
+    from datetime import datetime, timezone, timedelta
+
+    SCENARIOS = [
+        ("GATEWAY_ERROR",      "GATEWAY_DOWN",       0.72),
+        ("NETWORK_TIMEOUT",    "NETWORK_TIMEOUT",    0.68),
+        ("PAYMENT_CANCELLED",  "USER_CANCELLED",     0.41),
+        ("BAD_REQUEST_ERROR",  "USER_CANCELLED",     0.38),
+        ("INSUFFICIENT_FUNDS", "INSUFFICIENT_FUNDS", 0.22),
+        ("CARD_DECLINED",      "BANK_DECLINE",       0.45),
+        ("INVALID_CARD",       "INVALID_DETAILS",    0.18),
+    ]
+    STATUSES = ["FAILED", "ML_SCORED", "AGENT_EVALUATED",
+                "ACTION_TRIGGERED", "RECOVERING", "RECOVERED",
+                "LOW_PRIORITY_SKIP", "EXPIRED"]
+    WEIGHTS  = [5, 8, 10, 15, 12, 35, 8, 7]
+
+    inserted = 0
+    base_time = datetime.now(timezone.utc) - timedelta(hours=6)
+
+    for i in range(n):
+        sc          = random.choice(SCENARIOS)
+        err_code, cat, base_rate = sc
+        payment_id  = f"pay_{uuid.uuid4().hex[:16]}"
+        order_id    = f"order_{uuid.uuid4().hex[:16]}"
+        amount_p    = random.randint(50_000, 1_500_000)   # ₹500 – ₹15,000
+        score       = round(min(max(base_rate + random.uniform(-0.15, 0.15), 0.02), 0.98), 4)
+        status      = random.choices(STATUSES, weights=WEIGHTS, k=1)[0]
+        created_at  = (base_time + timedelta(minutes=i * 6 + random.randint(0, 5))).isoformat()
+
+        try:
+            _db.upsert_transaction(
+                payment_id, order_id, amount_p, "INR",
+                err_code,
+                f"Synthetic: {err_code.lower().replace('_', ' ')}",
+                f"u***@example.com",
+            )
+            _db.update_transaction(
+                payment_id, status,
+                failure_category=cat,
+                recoverability_score=score,
+            )
+            # Write one audit log entry per transaction
+            _db.append_audit_log(
+                payment_id,
+                "DEMO_SEED",
+                f"Demo seed: category={cat} score={score:.4f} status={status}",
+                "system",
+                score,
+            )
+            inserted += 1
+        except Exception:
+            pass
+
+    return inserted
+
+
+def _db_is_empty() -> bool:
+    try:
+        funnel = _db.get_funnel_counts()
+        return funnel.get("ingested", 0) == 0
+    except Exception:
+        return True
+
+
+# ── Auto-seed on first load ───────────────────────────────────────────────────
+if "demo_seeded" not in st.session_state:
+    st.session_state["demo_seeded"] = False
+
+if _db_is_empty() and not st.session_state["demo_seeded"]:
+    with st.spinner("🌱 Seeding demo data for first run…"):
+        _n = _seed_demo_data(60)
+        st.session_state["demo_seeded"] = True
+        st.cache_data.clear()
+    st.toast(f"✅ Seeded {_n} demo transactions — dashboard is live!", icon="🌱")
+
 # ── Design tokens ─────────────────────────────────────────────────────────────
 C = dict(
     blue="#4285f4", green="#34a853", orange="#fbbc04",
@@ -102,6 +187,12 @@ with st.sidebar:
     st.divider()
     if st.button("🔄 Force Refresh", use_container_width=True):
         st.cache_data.clear()
+        st.rerun()
+    if st.button("🌱 Seed Demo Data", use_container_width=True, help="Insert 60 synthetic transactions so all charts have live data"):
+        with st.spinner("Seeding…"):
+            _n = _seed_demo_data(60)
+            st.cache_data.clear()
+        st.success(f"Seeded {_n} transactions!")
         st.rerun()
     st.divider()
     st.caption(f"**DB:** `{_settings.database_path}`")

@@ -1,497 +1,285 @@
-<div align="center">
-
 # 🏦 RecoverAI Enterprise
-### Agentic Payment Degradation & Revenue Recovery Engine
 
-[![Razorpay AI Buildathon](https://img.shields.io/badge/Razorpay-AI%20Buildathon%202024-0D2463?style=for-the-badge&logo=razorpay&logoColor=white)](https://razorpay.com)
-[![Track 03](https://img.shields.io/badge/Track-03%20Payment%20Intelligence-3ECF8E?style=for-the-badge)](https://razorpay.com)
-[![Streamlit App](https://img.shields.io/badge/Streamlit-Live%20Dashboard-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://recoverai-enterprise.streamlit.app)
-[![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![LightGBM](https://img.shields.io/badge/LightGBM-ML%20Scoring-blue?style=for-the-badge)](https://lightgbm.readthedocs.io)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
+> **Agentic Payment Recovery Platform** — Razorpay AI Buildathon · Track 03
 
-**RecoverAI autonomously detects failed payments, scores them with a LightGBM ML model, classifies root causes via an AI agent, executes targeted recovery actions, and logs every decision in a tamper-proof cryptographic audit ledger — all in under 30 ms per webhook.**
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://recoverai-enterprise.streamlit.app)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[🚀 Live Demo](https://recoverai-enterprise.streamlit.app) · [📖 API Docs](https://recoverai-api.onrender.com/docs) · [📋 Deployment Guide](DEPLOYMENT.md)
-
-</div>
+RecoverAI autonomously recovers failed Razorpay payments using a multi-agent pipeline: LightGBM ML scoring → LLM root-cause classification → A/B-tested recovery strategies → cryptographic audit logging. No manual intervention needed for 85%+ of failures.
 
 ---
 
-## 📸 Dashboard Preview
+## ✨ Features
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  🏦 RecoverAI Enterprise — Intelligence Hub                              │
-│  Updated: 10:48:18  ·  Razorpay AI Buildathon · Track 03               │
-├─────────────┬──────────────┬──────────────┬────────────┬────────────────┤
-│ 💰 At Risk  │ ✅ Recovered │ 📈 Rate      │ 🤖 ML Score│ 🔐 Ledger     │
-│ ₹3,98,832   │ ₹2,11,410   │ 52.0%        │ 0.423      │ 🔒 VERIFIED   │
-├─────────────┴──────────────┴──────────────┴────────────┴────────────────┤
-│ 🔽 ML-Augmented Funnel     │ 🍩 Root Cause Breakdown                    │
-│  Ingested     → 50         │  USER_CANCELLED  ████████  34%             │
-│  ML Scored    → 50         │  NETWORK_TIMEOUT █████     22%             │
-│  Agent Eval   → 50         │  INSUFF_FUNDS    ████      18%             │
-│  Action Trig  → 50         │  GATEWAY_DOWN    ███       14%             │
-│  Recovered    → 26         │  BANK_DECLINE    ██         8%             │
-├────────────────────────────┴────────────────────────────────────────────┤
-│ 📊 Revenue at Risk vs Recovered  [WebGL Time-Series with Range Slider]  │
-│  ₹15K ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░                         │
-│  ₹10K  ░░▓▓░░▓▓▓░░░░░░▓▓░░░░░░░░░░░░░░░░░░░░ ← At Risk               │
-│   ₹5K   ░░░░░░░▓░░░▓░░░░░░▓▓▓░░▓░░░░░░░░░░░░ ← Recovered             │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+| Tab | What it does |
+|-----|-------------|
+| 📊 **Intelligence Hub** | Live KPIs, ML-augmented recovery funnel, time-series charts, SHA-256 audit ledger |
+| 🔗 **Payment Links** | Create / bulk-generate Razorpay Payment Links (mock + real API) |
+| 📨 **Dispatch** | Send recovery links via WhatsApp, SMS, or Email (mock + live) |
+| 👤 **HITL Approvals** | Human-in-the-Loop queue for high-value or ambiguous transactions |
+| 🧪 **A/B Testing** | Live experiment engine with z-score significance testing |
+| 💥 **Chaos Simulator** | Inject payload corruption, latency spikes, and bad signatures |
+| 🏢 **Merchants** | Multi-tenant isolation with per-merchant dashboards |
 
 ---
 
-## ✨ Key Features
+## 🚀 Live Demo
 
-| Feature | Implementation |
-|---|---|
-| ⚡ **Sub-30ms Webhook ACK** | FastAPI + `asyncio.Queue` — response before any DB/AI work |
-| 🤖 **ML Recoverability Scoring** | LightGBM + calibrated probabilities (0.00→1.00); score < 0.15 → skip |
-| 🧠 **AI Recovery Agent** | OpenAI GPT-4o-mini with 3s hard timeout → instant rule-engine fallback |
-| 🔒 **Tamper-Proof Audit Ledger** | SHA-256 hash chain — every decision cryptographically linked |
-| 🛡️ **PCI-DSS Ready** | HMAC-SHA256 webhook auth, recursive PII/PAN masking, parameterized SQL |
-| 💰 **Financial Precision** | All amounts as **INTEGER PAISE** — zero floating-point errors |
-| 📊 **Live Plotly WebGL Dashboard** | Funnel, time-series, donut, histogram — auto-refreshes every 5s |
-| 🔄 **Resilient by Design** | LLM timeout → rule engine, exponential backoff retries via `tenacity` |
+**[recoverai-enterprise.streamlit.app](https://recoverai-enterprise.streamlit.app)**
+
+On first load the app auto-seeds 60 synthetic transactions so every chart is populated immediately. Use the **🌱 Seed Demo Data** button in the sidebar to refresh at any time.
 
 ---
 
-## 🏗️ System Architecture
+## 🏗 Architecture
 
 ```
-                        ┌─────────────────────────────────┐
-                        │    Razorpay Webhook / Simulator  │
-                        └──────────────┬──────────────────┘
-                                       │  HTTPS POST + HMAC-SHA256
-                                       ▼
-              ┌────────────────────────────────────────────────┐
-              │         FastAPI Ingestion Gateway               │  < 30ms ACK
-              │   ① HMAC-SHA256 signature verify               │
-              │   ② Pydantic v2 strict schema validation       │
-              │   ③ Recursive PII/PAN redaction                │
-              │   ④ asyncio.Queue enqueue (non-blocking)       │
-              └────────────────────┬───────────────────────────┘
-                                   │
-                    ┌──────────────▼──────────────────┐
-                    │     Async Worker Pool (×4)       │
-                    │                                  │
-                    │  ┌─ Stage 1: ML Scoring ───────┐ │
-                    │  │  LightGBM + Calibration      │ │
-                    │  │  score < 0.15 → SKIP         │ │
-                    │  └────────────┬────────────────┘ │
-                    │               │                  │
-                    │  ┌─ Stage 2: LLM Agent ────────┐ │
-                    │  │  OpenAI GPT-4o-mini          │ │
-                    │  │  3s hard timeout             │ │
-                    │  │  Guardrail: discount ≤ 15%   │ │
-                    │  └────────────┬────────────────┘ │
-                    │               │ timeout / fail   │
-                    │  ┌─ Stage 3: Rule Engine ──────┐ │
-                    │  │  Zero-dependency fallback    │ │
-                    │  │  Deterministic action matrix │ │
-                    │  └────────────┬────────────────┘ │
-                    └───────────────┼──────────────────┘
-                                    │
-              ┌─────────────────────▼─────────────────────────┐
-              │          SQLite WAL Database                    │
-              │  transactions  (INTEGER paise, status, score)  │
-              │  audit_logs    (SHA-256 hash chain — immutable)│
-              └─────────────────────┬─────────────────────────┘
-                                    │
-              ┌─────────────────────▼─────────────────────────┐
-              │       Streamlit Enterprise Dashboard           │
-              │  KPI Cards · Funnel · Time-Series · Donut      │
-              │  ML Score Histogram · Ledger Verification      │
-              └────────────────────────────────────────────────┘
+Razorpay Webhook
+      │
+      ▼
+┌─────────────┐    HMAC     ┌──────────────────────────────────────┐
+│  FastAPI    │◄───verify───│  security.py  (PII redaction + HMAC) │
+│  main.py   │             └──────────────────────────────────────┘
+└──────┬──────┘
+       │ asyncio.Queue
+       ▼
+┌─────────────┐
+│queue_worker │  4 async workers
+└──────┬──────┘
+       │
+       ▼
+┌──────────────────────────────────────────────────────┐
+│  agent_engine.py  (LangGraph-style 8-node pipeline)  │
+│                                                      │
+│  Ingest → ML Score → A/B Route → LLM / Rules →      │
+│  HITL Gate → Dispatch → Razorpay Link → Audit Log    │
+└──────┬───────────────────────────┬───────────────────┘
+       │                           │
+       ▼                           ▼
+┌─────────────┐           ┌─────────────────┐
+│ ml_scorer   │           │  integrations/  │
+│ LightGBM    │           │  razorpay_links │
+│ KS drift    │           │  whatsapp_notif │
+│ hot-swap    │           └─────────────────┘
+└─────────────┘
+       │
+       ▼
+┌─────────────────────────────────────┐
+│  database.py  SQLite WAL            │
+│  SHA-256 hash-chain + HMAC ledger   │
+│  HITL queue · A/B counters          │
+└─────────────────────────────────────┘
+       │
+       ▼
+┌─────────────┐
+│ streamlit   │  7-tab dashboard (this file)
+│  app.py     │
+└─────────────┘
 ```
 
 ---
 
-## 📁 Repository Structure
+## ⚡ Quick Start (local)
+
+```bash
+# 1. Clone
+git clone https://github.com/SumedhPatil1507/RecoverAI.git
+cd RecoverAI
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Copy and edit secrets
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# Edit .streamlit/secrets.toml — minimum required: DATABASE_PATH
+
+# 4. Run the dashboard
+streamlit run streamlit_app.py
+
+# 5. (Optional) Run the FastAPI backend in a separate terminal
+uvicorn recover_ai.main:app --reload --port 8000
+
+# 6. (Optional) Send synthetic webhook events
+python recover_ai/data_simulator.py --burst 20
+```
+
+The dashboard auto-seeds 60 demo transactions on first run so charts are populated immediately.
+
+---
+
+## ☁️ Deploy to Streamlit Cloud
+
+### Step 1 — Fork & connect
+
+1. Fork this repo to your GitHub account (or use it directly if you're the owner).
+2. Go to **[share.streamlit.io](https://share.streamlit.io)** → **New app**.
+3. Set:
+   - **Repository:** `SumedhPatil1507/RecoverAI`
+   - **Branch:** `main`
+   - **Main file path:** `streamlit_app.py`
+
+### Step 2 — Add Secrets
+
+In Streamlit Cloud: **your app → ⋮ (three dots) → Settings → Secrets**
+
+Paste the following, replacing placeholder values:
+
+```toml
+# ── Required ──────────────────────────────────────────────────────────────────
+ENVIRONMENT   = "production"
+DATABASE_PATH = "/tmp/recover_ai_enterprise.db"
+ML_MODEL_PATH = "/tmp/recover_ai_lgbm.pkl"
+
+# ── Razorpay (get from dashboard.razorpay.com → Settings → API Keys) ─────────
+RAZORPAY_WEBHOOK_SECRET = "your_webhook_secret_here"
+RAZORPAY_KEY_ID         = "rzp_test_xxxxxxxxxxxx"
+RAZORPAY_KEY_SECRET     = "your_key_secret_here"
+
+# ── Optional: OpenAI (leave blank to use rule engine only) ───────────────────
+OPENAI_API_KEY = ""
+
+# ── Audit HMAC key (generate once, keep secret) ───────────────────────────────
+# python -c "import secrets; print(secrets.token_hex(32))"
+AUDIT_HMAC_KEY = "your_64_char_hex_key_here"
+
+# ── Optional: Gmail SMTP for email dispatch ───────────────────────────────────
+SMTP_HOST  = "smtp.gmail.com"
+SMTP_PORT  = "587"
+SMTP_TLS   = "true"
+SMTP_USER  = "sumedhp612@gmail.com"
+SMTP_PASS  = "your_gmail_app_password"
+SMTP_FROM  = "sumedhp612@gmail.com"
+
+# ── Optional: Slack + alert email ────────────────────────────────────────────
+SLACK_WEBHOOK_URL = ""
+ALERT_EMAIL_FROM  = "sumedhp612@gmail.com"
+ALERT_EMAIL_TO    = "sumedhp612@gmail.com"
+```
+
+Click **Save** — the app reboots automatically.
+
+> **Important:** `DATABASE_PATH` must be `/tmp/recover_ai_enterprise.db`.  
+> Streamlit Cloud mounts the repo as read-only; only `/tmp/` is writable.
+
+### Step 3 — Verify
+
+Once deployed the app auto-seeds demo data and all 7 tabs should be live within ~60 seconds.
+
+---
+
+## 🔑 Gmail App Password (for SMTP)
+
+You need an **App Password**, not your regular Gmail password:
+
+1. Go to [myaccount.google.com](https://myaccount.google.com)
+2. **Security** → **2-Step Verification** → make sure it's ON
+3. **Security** → **App passwords** (search for it if not visible)
+4. Select app: **Mail** · Select device: **Other** → type `RecoverAI`
+5. Click **Generate** → copy the 16-character password
+6. Paste it as `SMTP_PASS` in Streamlit Secrets (no spaces)
+
+---
+
+## 🌱 Demo Data
+
+The app auto-seeds 60 realistic synthetic transactions on first load (empty DB). To refresh:
+
+- Click **🌱 Seed Demo Data** in the sidebar → seeds another 60 transactions
+- All charts, the funnel, root-cause donut, and audit ledger populate immediately
+- No FastAPI server or Razorpay account needed for the dashboard
+
+---
+
+## 🧪 Chaos Stress Test
+
+Test the FastAPI backend's sub-30ms ACK SLA:
+
+```bash
+# Start the API first
+uvicorn recover_ai.main:app --port 8000
+
+# Fire 500 concurrent HMAC-signed webhooks
+python recover_ai/data_simulator.py --chaos 500 --workers 64
+```
+
+Output includes p50 / p95 / p99 latency, throughput, and SLA pass/fail.
+
+---
+
+## 🐳 Docker
+
+```bash
+# Full stack (API + dashboard)
+docker compose up api dashboard
+
+# Add synthetic data simulator
+docker compose --profile dev up
+
+# Run chaos test against the running API
+docker compose --profile chaos up
+
+# Full observability (+ Prometheus on :9090 + Grafana on :3000)
+docker compose --profile monitoring up
+```
+
+---
+
+## 📁 Project Structure
 
 ```
 RecoverAI/
-│
-├── streamlit_app.py          ← 🎯 Streamlit Cloud entry point (REPO ROOT)
-├── requirements.txt          ← Pinned production dependencies
-├── packages.txt              ← Linux apt packages (libgomp1 for LightGBM)
-├── runtime.txt               ← Python 3.11 pin for Streamlit Cloud
-├── Procfile                  ← Render / Railway process declaration
-├── render.yaml               ← Render Blueprint (auto-deploys both services)
-├── railway.toml              ← Railway config-as-code
-├── docker-compose.yml        ← API + Dashboard + optional Simulator
-├── Dockerfile                ← Multi-stage build, non-root user, libgomp1
-├── .env.example              ← All environment variables documented
-│
-├── recover_ai/               ← Application package
-│   ├── __init__.py
-│   ├── _path.py              ← sys.path resolver (flat imports everywhere)
-│   ├── config.py             ← pydantic-settings + Streamlit Cloud injection
-│   ├── security.py           ← HMAC-SHA256 verify + recursive PII redaction
-│   ├── database.py           ← SQLite WAL, parameterized SQL, SHA-256 ledger
-│   ├── schemas.py            ← Pydantic v2 strict models (integer paise)
-│   ├── ml_scorer.py          ← LightGBM pipeline, auto-train, persist/reload
-│   ├── agent_engine.py       ← Async orchestrator: ML → LLM → rule fallback
-│   ├── queue_worker.py       ← asyncio.Queue pool, graceful shutdown
-│   ├── main.py               ← FastAPI gateway + /api/stats/* endpoints
-│   ├── app.py                ← Streamlit dashboard (all charts + ledger UI)
-│   ├── data_simulator.py     ← HMAC-signed synthetic + live event generator
-│   └── requirements.txt      ← Package mirror (for recover_ai-only deploys)
-│
+├── streamlit_app.py              # Streamlit Cloud entry point (this IS the app)
+├── requirements.txt              # All dependencies
 ├── .streamlit/
-│   ├── config.toml           ← Dark theme, headless=true, CORS config
-│   └── secrets.toml.example  ← Template for Streamlit Cloud Secrets UI
-│
-├── .github/workflows/
-│   └── deploy.yml            ← CI: syntax check → import test → Docker build
-│
-├── aws/
-│   └── apprunner.yaml        ← AWS App Runner service config
-│
-└── azure/
-    └── webapp.bicep          ← Azure App Service Infrastructure-as-Code
+│   ├── config.toml               # Theme + server settings
+│   └── secrets.toml.example      # Copy → secrets.toml for local dev
+├── recover_ai/
+│   ├── main.py                   # FastAPI gateway (webhooks + metrics)
+│   ├── agent_engine.py           # 8-node recovery pipeline (A/B + HITL)
+│   ├── ml_scorer.py              # LightGBM + KS drift detection + hot-swap
+│   ├── database.py               # SQLite + SHA-256/HMAC audit ledger
+│   ├── schemas.py                # Pydantic models (incl. HITL + A/B)
+│   ├── security.py               # PII redaction + HMAC signature verify
+│   ├── queue_worker.py           # Async job queue (4 workers)
+│   ├── config.py                 # pydantic-settings (v1 + v2 compat)
+│   ├── data_simulator.py         # Webhook simulator + chaos stress test
+│   └── integrations/
+│       ├── razorpay_links.py     # Razorpay Payment Links API client
+│       └── whatsapp_notifier.py  # WhatsApp / SMS / Email dispatcher
+├── terraform/                    # AWS IaC (EKS, Aurora, Redis, Secrets Manager)
+├── .github/workflows/deploy.yml  # 8-stage CI/CD pipeline
+├── docker-compose.yml            # Local dev + chaos + monitoring profiles
+└── monitoring/                   # Prometheus + Grafana configuration
 ```
 
 ---
 
-## 🚀 Quick Start (Local)
+## 🔐 Security Model
 
-### Prerequisites
-- Python 3.11+
-- Git
-
-### 1 — Clone & Install
-
-```bash
-git clone https://github.com/SumedhPatil1507/RecoverAI.git
-cd RecoverAI
-pip install -r requirements.txt
-```
-
-### 2 — Configure
-
-```bash
-cp .env.example .env
-# Defaults work for local dev — no changes needed to start
-```
-
-### 3 — Start the API (Terminal 1)
-
-```bash
-uvicorn recover_ai.main:app --reload --port 8000
-```
-
-> First run trains LightGBM on ~5,000 synthetic samples (~25s), then persists the model to `recover_ai_lgbm.pkl`. Subsequent starts load in milliseconds.
-
-### 4 — Start the Dashboard (Terminal 2)
-
-```bash
-streamlit run streamlit_app.py
-# → Opens at http://localhost:8501
-```
-
-### 5 — Send Events (Terminal 3)
-
-```bash
-# Burst-seed 50 events immediately (best for demo)
-python recover_ai/data_simulator.py --burst 50
-
-# Continuous stream (one event every 5 seconds)
-python recover_ai/data_simulator.py
-
-# Exactly N events
-python recover_ai/data_simulator.py --count 100 --interval 2
-
-# Single live-format integration test
-python recover_ai/data_simulator.py --live
-```
+- **Webhook authentication** — HMAC-SHA256 verified on every inbound event (`X-Razorpay-Signature`)
+- **PII redaction** — email, phone, card data scrubbed before any DB write
+- **Audit ledger** — every action is SHA-256 hash-chained *and* HMAC-SHA256 signed with `AUDIT_HMAC_KEY`; tampering with any row breaks the full chain
+- **Discount guardrail** — LLM cannot propose a discount > 15%; hard-capped in two places
+- **HITL gate** — transactions over ₹50,000 or with ambiguous ML scores are held for human review before any action is taken
 
 ---
 
-## 🌐 Streamlit Cloud Deployment
+## 🛠 Tech Stack
 
-### Fill in the Deploy form exactly as follows:
-
-| Field | Value |
-|---|---|
-| **Repository** | `SumedhPatil1507/RecoverAI` |
-| **Branch** | `main` |
-| **Main file path** | `streamlit_app.py` |
-| **App URL** | `recoverai-enterprise` |
-
-### Advanced Settings → Secrets
-
-Paste this block into the Secrets text box:
-
-```toml
-RAZORPAY_WEBHOOK_SECRET   = "dev_secret_replace_in_production"
-OPENAI_API_KEY            = ""
-DATABASE_PATH             = "recover_ai_enterprise.db"
-ML_MODEL_PATH             = "recover_ai_lgbm.pkl"
-ENVIRONMENT               = "production"
-MAX_RECOVERY_ATTEMPTS     = "2"
-ML_LOW_PRIORITY_THRESHOLD = "0.15"
-MAX_DISCOUNT_PCT          = "15.0"
-QUEUE_WORKERS             = "4"
-WEBHOOK_BASE_URL          = "https://your-api.onrender.com"
-DASHBOARD_REFRESH_SECONDS = "5"
-```
-
-> `OPENAI_API_KEY` can be left blank — the deterministic rule engine handles classification for free.
-
----
-
-## 🐳 Docker Deployment
-
-```bash
-cp .env.example .env          # set RAZORPAY_WEBHOOK_SECRET
-
-# Production (API + Dashboard)
-docker compose up --build -d
-
-# Development (adds live simulator)
-docker compose --profile dev up --build -d
-
-# View logs
-docker compose logs -f api
-docker compose logs -f dashboard
-```
-
-| Service | Port | URL |
-|---|---|---|
-| FastAPI API | `8000` | `http://localhost:8000/docs` |
-| Streamlit Dashboard | `8501` | `http://localhost:8501` |
-
----
-
-## 🔌 API Reference
-
-### Webhook Ingestion
-
-```http
-POST /webhook/razorpay
-Content-Type: application/json
-X-Razorpay-Signature: <hmac-sha256-hex>
-```
-
-Response (< 30ms):
-```json
-{
-  "status": "ok",
-  "message": "Payment pay_abc123 queued for recovery analysis.",
-  "payment_id": "pay_abc123"
-}
-```
-
-### Stats Endpoints
-
-| Endpoint | Description |
-|---|---|
-| `GET /health` | Liveness: DB status, queue depth, ledger integrity |
-| `GET /docs` | Interactive Swagger UI |
-| `GET /api/stats/funnel` | ML-augmented 5-stage conversion funnel |
-| `GET /api/stats/root-causes` | Failure category breakdown |
-| `GET /api/stats/timeseries` | Per-minute revenue time-series |
-| `GET /api/stats/summary` | KPIs: risk, recovered, recovery rate, avg ML score |
-| `GET /api/audit/logs` | Last 200 immutable audit log entries |
-| `GET /api/audit/verify` | Run full SHA-256 hash-chain integrity verification |
-| `GET /api/transactions` | Last 200 transaction records |
-
----
-
-## 🛡️ Security Design
-
-### HMAC-SHA256 Webhook Authentication
-Every request to `POST /webhook/razorpay` is verified using constant-time comparison (`hmac.compare_digest`) before any processing. Requests with missing or invalid `X-Razorpay-Signature` headers are rejected with HTTP 401.
-
-### Recursive PII / PAN Masking
-Before any database write or LLM call, all sensitive fields are masked:
-
-```python
-# Input
-{"email": "john.doe@example.com", "card_number": "4111111111111111"}
-
-# After redact_pii()
-{"email": "j****.***@example.com", "card_number": "**** **** **** 1111"}
-```
-
-Fields covered: `card_number`, `email`, `phone`, `contact`, `cvv`, `vpa`, `name`, `address` + regex-based value-level detection.
-
-### SHA-256 Hash-Chain Audit Ledger
-Every AI decision writes an immutable record:
-
-```
-log_id=1  prev=GENESIS         → hash=a3f9...
-log_id=2  prev=a3f9...         → hash=7bc2...
-log_id=3  prev=7bc2...         → hash=e441...
-```
-
-Any modification to a past record breaks the chain and is detected by `GET /api/audit/verify`.
-
-### SQL Injection Prevention
-100% parameterized queries throughout `database.py` — zero string interpolation in SQL.
-
-### Financial Precision
-All monetary values stored as `INTEGER PAISE` (₹500 = `50000`). No floating-point arithmetic on revenue figures.
-
----
-
-## 🤖 ML Pipeline
-
-```
-Input Features:
-  amount_rupees      → float  (₹500 – ₹15,000)
-  error_code_category → int   (0=GATEWAY_DOWN … 6=UNKNOWN)
-  hour_of_day        → int   (0–23)
-  retry_count        → int   (0–2)
-
-Model:
-  LGBMClassifier(n_estimators=200, learning_rate=0.05, num_leaves=31)
-  + CalibratedClassifierCV(method="isotonic", cv=3)
-
-Output:
-  recoverability_score ∈ [0.00, 1.00]
-  
-  score < 0.15  →  LOW_PRIORITY_SKIP  (no LLM call, no customer contact)
-  score ≥ 0.15  →  Agent evaluation proceeds
-```
-
-Training: 5,000 synthetic samples on first run (~25s), then auto-loaded from `recover_ai_lgbm.pkl`.
-
----
-
-## 📋 Recovery Action Matrix
-
-| Root Cause | Attempt 1 | Attempt 2 |
-|---|---|---|
-| `GATEWAY_DOWN` | `RETRY_PAYMENT` | `OFFER_ALTERNATE_UPI` |
-| `NETWORK_TIMEOUT` | `RETRY_PAYMENT` | `OFFER_ALTERNATE_UPI` |
-| `USER_CANCELLED` | `SEND_REMINDER` | `OFFER_EMI` |
-| `INSUFFICIENT_FUNDS` | `OFFER_EMI` | `NOTIFY_SUPPORT` |
-| `INVALID_DETAILS` | `SEND_REMINDER` | `NOTIFY_SUPPORT` |
-| `BANK_DECLINE` | `OFFER_ALTERNATE_UPI` | `NOTIFY_SUPPORT` |
-| `UNKNOWN` | `NOTIFY_SUPPORT` | `NO_ACTION` |
-
-After 2 attempts → status: `EXPIRED`.
-
----
-
-## ⚙️ Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `RAZORPAY_WEBHOOK_SECRET` | `dev_secret_…` | **Required** — HMAC signing secret |
-| `OPENAI_API_KEY` | _(empty)_ | Optional — leave blank for rule engine only |
-| `DATABASE_PATH` | `recover_ai_enterprise.db` | SQLite file location |
-| `ML_MODEL_PATH` | `recover_ai_lgbm.pkl` | LightGBM model pickle |
-| `ENVIRONMENT` | `development` | `development` / `staging` / `production` |
-| `QUEUE_WORKERS` | `4` | Concurrent async agent workers |
-| `MAX_RECOVERY_ATTEMPTS` | `2` | Hard cap per transaction |
-| `ML_LOW_PRIORITY_THRESHOLD` | `0.15` | Score below which transaction is skipped |
-| `MAX_DISCOUNT_PCT` | `15.0` | LLM guardrail cap (discount > 15% rejected) |
-| `SIMULATOR_INTERVAL_SECONDS` | `5.0` | Seconds between simulator events |
-| `DASHBOARD_REFRESH_SECONDS` | `5` | Auto-refresh interval |
-
----
-
-## 🌍 Deployment Options
-
-| Platform | API | Dashboard | Free Tier | Guide |
-|---|---|---|---|---|
-| **Streamlit Cloud** | ✗ | ✓ | ✓ | [See above](#-streamlit-cloud-deployment) |
-| **Render** | ✓ | ✓ | ✓ (sleeps) | [DEPLOYMENT.md](DEPLOYMENT.md#step-3--render) |
-| **Railway** | ✓ | ✓ | ✓ ($5 credit) | [DEPLOYMENT.md](DEPLOYMENT.md#step-4--railway) |
-| **AWS App Runner** | ✓ | Via EC2 | ✗ | [DEPLOYMENT.md](DEPLOYMENT.md#step-5--aws-app-runner) |
-| **Azure App Service** | ✓ | ✓ | ✗ (F1 free) | [DEPLOYMENT.md](DEPLOYMENT.md#step-6--azure-app-service) |
-| **Docker (any VPS)** | ✓ | ✓ | ✓ | [See above](#-docker-deployment) |
-
----
-
-## 📦 Dependencies
-
-```
-fastapi==0.115.5          Web framework
-uvicorn[standard]==0.32.1 ASGI server
-pydantic==2.9.2           Data validation
-pydantic-settings==2.6.1  Settings management
-httpx==0.27.2             Async HTTP client (LLM calls)
-streamlit==1.39.0         Dashboard framework
-streamlit-autorefresh     Auto-refresh component
-plotly==5.24.1            WebGL charts
-pandas==2.2.3             Data manipulation
-scikit-learn==1.5.2       ML calibration wrapper
-lightgbm==4.5.0           Gradient boosting classifier
-numpy==1.26.4             Numerical computing
-tenacity==9.0.0           Retry / exponential backoff
-```
-
----
-
-## 🗂️ CI/CD
-
-GitHub Actions pipeline on every push to `main`:
-
-```
-push → main
-  ├── [quality]  Syntax check all 10 Python modules
-  ├── [quality]  Import smoke test (config, schemas, DB, ML scorer)
-  ├── [docker]   Multi-stage Docker build (cache-optimised)
-  └── [push]     Push image to Docker Hub (main branch only)
-```
-
----
-
-## 🧪 Testing the Webhook Manually
-
-```bash
-# Linux / macOS
-BODY='{"entity":"event","event":"payment.failed","payload":{"payment":{"entity":{"id":"pay_test01","order_id":"order_test01","amount":500000,"currency":"INR","error_code":"GATEWAY_ERROR","error_description":"Bank timeout"}}}}'
-SECRET="dev_secret_replace_in_production"
-SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
-
-curl -X POST http://127.0.0.1:8000/webhook/razorpay \
-  -H "Content-Type: application/json" \
-  -H "X-Razorpay-Signature: $SIG" \
-  -d "$BODY"
-```
-
-Expected response:
-```json
-{"status":"ok","message":"Payment pay_test01 queued for recovery analysis.","payment_id":"pay_test01"}
-```
-
----
-
-## ✅ Production Checklist
-
-- [ ] Set a strong random `RAZORPAY_WEBHOOK_SECRET` (not the dev default)
-- [ ] Store `OPENAI_API_KEY` in a secrets manager (AWS Secrets Manager / Azure Key Vault)
-- [ ] Replace SQLite with PostgreSQL for multi-instance / multi-region deployments
-- [ ] Enable TLS termination (nginx / AWS ALB / Azure Application Gateway)
-- [ ] Add rate limiting to the webhook endpoint (e.g., `slowapi`)
-- [ ] Configure Razorpay dashboard to send webhooks only to your HTTPS endpoint
-- [ ] Set up log aggregation (CloudWatch / Azure Monitor / Datadog)
-- [ ] Schedule periodic `GET /api/audit/verify` checks for ledger integrity monitoring
-- [ ] Set `ENVIRONMENT=production` to enable production-mode guards
+| Layer | Technology |
+|-------|-----------|
+| Dashboard | Streamlit 1.45+, Plotly |
+| API | FastAPI, Uvicorn, asyncio |
+| ML | LightGBM, scikit-learn, scipy (KS drift) |
+| Database | SQLite (WAL), SHA-256 + HMAC ledger |
+| Notifications | Razorpay Payment Links, Meta WhatsApp Cloud, Twilio, SMTP |
+| Observability | Prometheus, Grafana |
+| IaC | Terraform (AWS EKS Fargate, Aurora PG, ElastiCache Redis) |
+| CI/CD | GitHub Actions (ruff, Bandit, Docker, Terraform, kubectl) |
 
 ---
 
 ## 📄 License
 
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-<div align="center">
-
-**Built for the Razorpay AI Buildathon 2024 — Track 03: Payment Intelligence**
-
-*FastAPI · SQLite WAL · LightGBM · SHA-256 Ledger · Streamlit · Plotly WebGL · OpenAI*
-
-⭐ Star this repo if it helped you · [Report Issues](https://github.com/SumedhPatil1507/RecoverAI/issues)
-
-</div>
+MIT — see [LICENSE](LICENSE).
