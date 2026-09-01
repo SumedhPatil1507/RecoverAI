@@ -253,6 +253,37 @@ class RazorpayLinksClient:
         return hmac.compare_digest(expected, razorpay_signature.lower())
 
 
+class RazorpayLinkClient:
+    """Async façade for dynamic recovery links.
+
+    The existing synchronous client remains available for the dashboard; this
+    interface is used by async workers and falls back to mock links when keys
+    are absent.
+    """
+    def __init__(self, key_id: str = "", key_secret: str = "") -> None:
+        self._client = RazorpayLinksClient(key_id=key_id, key_secret=key_secret)
+
+    async def create_recovery_link(
+        self, payment_id: str, amount_paise: int, discount_pct: float,
+        customer_phone: str, expiry_mins: int = 30,
+    ) -> dict[str, Any]:
+        from decimal import Decimal, ROUND_HALF_UP
+        amount = Decimal(amount_paise) * (Decimal("1") - Decimal(str(discount_pct)) / 100)
+        discounted_paise = int(amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        req = PaymentLinkRequest(
+            amount_rupees=discounted_paise / 100,
+            description=f"RecoverAI recovery for {payment_id}",
+            customer=PaymentLinkCustomer(contact=customer_phone),
+            reference_id=payment_id,
+            expire_minutes=max(1, int(expiry_mins)),
+        )
+        result = await __import__("asyncio").to_thread(self._client.create, req)
+        return {"payment_id": payment_id, "link_id": result.link_id,
+                "short_url": result.short_url, "amount_paise": discounted_paise,
+                "discount_pct": float(discount_pct), "expires_at": result.expires_at,
+                "mock": bool(result.raw.get("_mock", False)), "raw": result.raw}
+
+
 # ── Module-level singleton factory ────────────────────────────────────────────
 
 _client: RazorpayLinksClient | None = None

@@ -727,3 +727,11 @@ def get_ab_results() -> dict[str, dict]:
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM ab_experiment").fetchall()
     return {r["arm"]: dict(r) for r in rows}
+
+
+# Initialize on import so lightweight API/module consumers and Streamlit have a
+# ready schema even when no FastAPI lifespan event has run yet.
+try:
+    init_db()
+except Exception as exc:
+    logger.warning("Database eager initialization deferred: %s", exc)

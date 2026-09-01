@@ -147,6 +147,11 @@ jobs:
             recover_ai/queue_worker.py \
             recover_ai/main.py \
             recover_ai/data_simulator.py \
+            recover_ai/merchant_copilot.py \
+            recover_ai/explainability.py \
+            recover_ai/recovery_optimization.py \
+            recover_ai/experimentation.py \
+            recover_ai/anomaly_detection.py \
             recover_ai/integrations/razorpay_links.py \
             recover_ai/integrations/whatsapp_notifier.py \
             streamlit_app.py; do
@@ -198,6 +203,28 @@ jobs:
           assert result.status == 'created'
           assert 'rzp.io' in result.short_url
           print('razorpay_links OK — mock link:', result.short_url)
+          "
+          python -c "
+          from merchant_copilot import validate_sql
+          assert validate_sql('DELETE FROM transactions')[0] is False
+          print('merchant_copilot OK — read-only SQL validation working')
+          "
+          python -c "
+          from recovery_optimization import recommend
+          result = recommend({'amount_paise': 100000, 'recoverability_score': 0.5, 'failure_category': 'GATEWAY_DOWN'})
+          assert 0 < result['expected_success_probability'] <= 1
+          print('recovery_optimization OK — recommendation generated')
+          "
+          python -c "
+          from experimentation import record, report
+          record('retry_now', True, 1000, 1, 10)
+          assert report()['strategies'][0]['recovered'] >= 1
+          print('experimentation OK — outcome recorded')
+          "
+          python -c "
+          from anomaly_detection import detect
+          assert 'anomalies' in detect([])
+          print('anomaly_detection OK — scanner available')
           "
           python -c "
           from integrations.whatsapp_notifier import NotificationDispatcher, DispatchRequest, DispatchChannel, DispatchStatus

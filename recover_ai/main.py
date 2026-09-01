@@ -14,7 +14,9 @@ Endpoints:
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import hmac
 import logging
 import os
 import sys
@@ -26,7 +28,7 @@ if _pkg not in sys.path:
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 import database as db
 import queue_worker as qw
@@ -39,6 +41,11 @@ from schemas import (
     WebhookAck,
 )
 from security import redact_pii, signature_required
+from anomaly_detection import detect as detect_anomalies
+from explainability import explain_transaction, export_pdf
+from experimentation import choose_strategy, record as record_experiment, report as experiment_report
+from merchant_copilot import answer as copilot_answer
+from recovery_optimization import recommend as optimize_recovery, simulate as simulate_optimization
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,6 +69,26 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# ── Tenant API-key authentication ─────────────────────────────────────────────
+def _tenant_keys() -> dict[str, str]:
+    raw = settings.tenant_api_keys or os.getenv("TENANT_API_KEYS", "")
+    return {pair.split(":", 1)[0]: pair.split(":", 1)[1] for pair in raw.split(",") if ":" in pair}
+
+
+@app.middleware("http")
+async def _tenant_auth(request: Request, call_next):
+    keys = _tenant_keys()
+    if keys and request.url.path.startswith("/api/"):
+        supplied = request.headers.get("X-API-Key", "")
+        merchant = next((mid for mid, key in keys.items() if hmac.compare_digest(key, supplied)), None)
+        if merchant is None:
+            return JSONResponse(status_code=401, content={"detail": "Invalid tenant API key"})
+        request.state.merchant_id = merchant
+    else:
+        request.state.merchant_id = request.headers.get("X-Merchant-ID", "default")
+    return await call_next(request)
+
 
 # ── Prometheus instrumentation ────────────────────────────────────────────────
 try:
@@ -299,8 +326,75 @@ async def api_transactions() -> list:
     return [dict(r) for r in db.get_all_transactions(limit=200)]
 
 
-# ── Audit ─────────────────────────────────────────────────────────────────────
+# ── AI Agents ──────────────────────────────────────────────────────────────────
+@app.post("/api/copilot/query", tags=["copilot"])
+async def api_copilot_query(body: dict) -> dict:
+    question = str(body.get("question", "")).strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+    return copilot_answer(question)
 
+
+@app.post("/api/copilot/stream", tags=["copilot"])
+async def api_copilot_stream(body: dict):
+    question = str(body.get("question", "")).strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+    result = copilot_answer(question)
+    async def events():
+        for chunk in result["answer"].split(" "):
+            yield f"data: {chunk}\\n\\n"
+            await asyncio.sleep(0)
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+@app.get("/api/explain/{payment_id}", tags=["explainability"])
+async def api_explain(payment_id: str) -> dict:
+    row = db.get_transaction(payment_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="transaction not found")
+    return explain_transaction(dict(row))
+
+
+@app.get("/api/explain/{payment_id}/pdf", tags=["explainability"])
+async def api_explain_pdf(payment_id: str):
+    from fastapi.responses import Response
+    row = db.get_transaction(payment_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="transaction not found")
+    return Response(content=export_pdf(explain_transaction(dict(row))), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={payment_id}_explanation.pdf"})
+
+
+@app.post("/api/recovery/optimize", tags=["optimization"])
+async def api_recovery_optimize(body: dict) -> dict:
+    return optimize_recovery(body)
+
+
+@app.post("/api/recovery/simulate", tags=["optimization"])
+async def api_recovery_simulate(body: dict) -> dict:
+    return simulate_optimization(body.get("events", []), int(body.get("rounds", 200)))
+
+
+@app.get("/api/experiments/report", tags=["experimentation"])
+async def api_experiment_report() -> dict:
+    return experiment_report()
+
+
+@app.post("/api/experiments/outcome", tags=["experimentation"])
+async def api_experiment_outcome(body: dict) -> dict:
+    record_experiment(str(body["strategy"]), bool(body.get("recovered", False)), float(body.get("revenue", 0)), float(body.get("friction", 0)), float(body.get("time_to_recovery_minutes", 0)))
+    return experiment_report()
+
+
+@app.post("/api/anomalies/scan", tags=["anomaly"])
+async def api_anomaly_scan(body: dict | None = None) -> dict:
+    transactions = body.get("transactions") if body else None
+    if transactions is None:
+        transactions = [dict(row) for row in db.get_all_transactions(1000)]
+    return detect_anomalies(transactions)
+
+
+# ── Audit ─────────────────────────────────────────────────────────────────────
 @app.get("/api/audit/logs",         tags=["audit"])
 async def api_audit_logs() -> list:
     return [dict(r) for r in db.get_audit_logs(limit=200)]

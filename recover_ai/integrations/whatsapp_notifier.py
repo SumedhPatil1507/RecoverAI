@@ -274,6 +274,32 @@ def _send_email(
         )
 
 
+class WhatsAppNotifier:
+    """Async WhatsApp Business/Twilio-compatible notifier."""
+    def __init__(self) -> None:
+        self._dispatcher = NotificationDispatcher()
+
+    async def dispatch_recovery_action(
+        self, customer_phone: str, payment_link: str, payment_id: str,
+        amount_paise: int, action: str = "SEND_REMINDER",
+    ) -> dict[str, Any]:
+        import asyncio
+        req = DispatchRequest(
+            recipient_phone=customer_phone,
+            recipient_email="",
+            recipient_name="Customer",
+            payment_id=payment_id,
+            amount_rupees=amount_paise / 100,
+            payment_link=payment_link,
+            failure_reason=action.replace("_", " ").title(),
+            channels=[DispatchChannel.WHATSAPP],
+        )
+        results = await asyncio.to_thread(self._dispatcher.dispatch, req)
+        return {"payment_id": payment_id, "status": results[0].status.value if results else "failed",
+                "dispatch_id": results[0].dispatch_id if results else "", "mock": bool(results and results[0].mock),
+                "results": [r.__dict__ for r in results]}
+
+
 # ── Public dispatcher ─────────────────────────────────────────────────────────
 
 class NotificationDispatcher:
