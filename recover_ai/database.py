@@ -400,6 +400,81 @@ def verify_audit_integrity() -> tuple[bool, str]:
     )
 
 
+def verify_audit_integrity_detailed() -> tuple[bool, str, list[int], int]:
+    """
+    Extended two-layer verification returning a list of tampered log_ids.
+
+    Returns:
+        ok           – True if chain is intact.
+        message      – Human-readable summary.
+        tampered_ids – List of log_ids where divergence was detected.
+        total        – Total records checked.
+
+    Used by ``GET /api/v1/audit/verify`` for SOC2-compliant reporting.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT log_id, transaction_id, action_taken, decision_rationale,
+                   source, recoverability_score, timestamp,
+                   previous_hash, current_hash, hmac_signature,
+                   COALESCE(merchant_id, 'default') AS merchant_id
+              FROM audit_logs
+             ORDER BY log_id ASC
+            """
+        ).fetchall()
+
+    if not rows:
+        return True, "Ledger is empty — no records to verify.", [], 0
+
+    running_hash  = "GENESIS"
+    tampered: list[int] = []
+
+    for row in rows:
+        data = {
+            "transaction_id":       row["transaction_id"],
+            "action_taken":         row["action_taken"],
+            "decision_rationale":   row["decision_rationale"],
+            "source":               row["source"],
+            "recoverability_score": row["recoverability_score"],
+            "timestamp":            row["timestamp"],
+            "merchant_id":          row["merchant_id"],
+        }
+        chain_ok = True
+        if row["previous_hash"] != running_hash:
+            chain_ok = False
+        else:
+            recomputed = compute_event_hash(running_hash, data)
+            if recomputed != row["current_hash"]:
+                chain_ok = False
+            else:
+                running_hash = recomputed
+
+        stored_hmac = row["hmac_signature"] or ""
+        hmac_ok = True
+        if stored_hmac:
+            hmac_ok = _hmac_mod.compare_digest(stored_hmac, _compute_row_hmac(data))
+
+        if not chain_ok or not hmac_ok:
+            tampered.append(row["log_id"])
+
+    total = len(rows)
+    if tampered:
+        return (
+            False,
+            f"TAMPER DETECTED: {len(tampered)}/{total} records failed verification. "
+            f"First tampered log_id: {tampered[0]}",
+            tampered,
+            total,
+        )
+    return (
+        True,
+        f"100% IMMUTABLE & VERIFIED — {total} records validated (SHA-256 + HMAC).",
+        [],
+        total,
+    )
+
+
 # ── Transaction CRUD ──────────────────────────────────────────────────────────
 
 def upsert_transaction(

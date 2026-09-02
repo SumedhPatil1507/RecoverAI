@@ -709,6 +709,135 @@ with tab4:
                                    "Reason": it["reason"], "Notes": it["notes"]})
                 st.dataframe(pd.DataFrame(rows_r), use_container_width=True)
 
+    # ── ROI Calculator ────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("## 💰 A/B Financial Lift & ROI Calculator")
+    st.caption("Compare net recovered revenue, AI compute costs, margin lift, and statistical confidence across arms")
+
+    # ── Inputs ────────────────────────────────────────────────────────────────
+    roi_c1, roi_c2, roi_c3 = st.columns(3)
+    with roi_c1:
+        st.markdown("##### Control Arm")
+        ctrl_sent      = st.number_input("Transactions sent",     min_value=1, value=1000, key="roi_ctrl_sent")
+        ctrl_rec       = st.number_input("Recovered",             min_value=0, value=310,  key="roi_ctrl_rec")
+        ctrl_avg_amt   = st.number_input("Avg transaction (₹)",   min_value=1, value=2500, key="roi_ctrl_amt")
+        ctrl_cost_per  = st.number_input("AI cost per txn (₹)",   min_value=0.0, value=0.8, step=0.1, key="roi_ctrl_cost")
+
+    with roi_c2:
+        st.markdown("##### Variant Arm (ML + LLM)")
+        var_sent       = st.number_input("Transactions sent",     min_value=1, value=1000, key="roi_var_sent")
+        var_rec        = st.number_input("Recovered",             min_value=0, value=510,  key="roi_var_rec")
+        var_avg_amt    = st.number_input("Avg transaction (₹)",   min_value=1, value=2500, key="roi_var_amt")
+        var_cost_per   = st.number_input("AI cost per txn (₹)",   min_value=0.0, value=3.2, step=0.1, key="roi_var_cost")
+
+    with roi_c3:
+        st.markdown("##### Business Parameters")
+        margin_pct     = st.slider("Gross margin %",      10, 100, 75)
+        discount_avg   = st.slider("Avg discount offered %", 0, 15, 4)
+        platform_fee   = st.number_input("Platform fee per recovery (₹)", min_value=0.0, value=5.0, step=0.5)
+
+    # ── Computations ──────────────────────────────────────────────────────────
+    import math as _math
+
+    ctrl_rate  = ctrl_rec / ctrl_sent if ctrl_sent else 0
+    var_rate   = var_rec  / var_sent  if var_sent  else 0
+    lift_abs   = var_rate - ctrl_rate
+    lift_rel   = (lift_abs / ctrl_rate * 100) if ctrl_rate > 0 else 0
+
+    # Gross recovered revenue
+    discount_mult   = 1 - discount_avg / 100
+    ctrl_gross      = ctrl_rec * ctrl_avg_amt * discount_mult
+    var_gross       = var_rec  * var_avg_amt  * discount_mult
+
+    # Margin contribution
+    ctrl_margin     = ctrl_gross * margin_pct / 100
+    var_margin      = var_gross  * margin_pct / 100
+
+    # AI + platform costs
+    ctrl_total_cost = ctrl_sent * ctrl_cost_per + ctrl_rec * platform_fee
+    var_total_cost  = var_sent  * var_cost_per  + var_rec  * platform_fee
+
+    # Net recovered revenue (after costs)
+    ctrl_net        = ctrl_margin - ctrl_total_cost
+    var_net         = var_margin  - var_total_cost
+    net_lift_inr    = var_net - ctrl_net
+    roi_pct         = (net_lift_inr / var_total_cost * 100) if var_total_cost > 0 else 0
+
+    # Z-score (two-proportion z-test)
+    if ctrl_sent > 10 and var_sent > 10 and ctrl_rate > 0:
+        p_pool = (ctrl_rec + var_rec) / (ctrl_sent + var_sent)
+        se     = _math.sqrt(p_pool * (1 - p_pool) * (1 / ctrl_sent + 1 / var_sent))
+        z_score = (var_rate - ctrl_rate) / se if se > 0 else 0
+        sig_95  = abs(z_score) > 1.96
+        sig_99  = abs(z_score) > 2.576
+    else:
+        z_score = sig_95 = sig_99 = 0
+
+    # ── KPI tiles ─────────────────────────────────────────────────────────────
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Control Recovery",  f"{ctrl_rate*100:.1f}%")
+    k2.metric("Variant Recovery",  f"{var_rate*100:.1f}%",
+              delta=f"+{lift_rel:.1f}% lift" if lift_rel > 0 else f"{lift_rel:.1f}%")
+    k3.metric("Net Revenue Lift",  f"₹{net_lift_inr:,.0f}",
+              delta="positive" if net_lift_inr > 0 else "negative")
+    k4.metric("Variant ROI",       f"{roi_pct:.0f}%")
+    k5.metric("Z-score",           f"{z_score:.2f}")
+    k6.metric("Significant (95%)", "✅ Yes" if sig_95 else "⏳ No")
+
+    # ── Detailed financials table ──────────────────────────────────────────────
+    st.markdown("#### Detailed Financial Comparison")
+    fin_df = pd.DataFrame([
+        {"Metric": "Recovery rate",        "Control": f"{ctrl_rate*100:.2f}%",   "Variant": f"{var_rate*100:.2f}%",   "Δ Lift": f"+{lift_abs*100:.2f}pp"},
+        {"Metric": "Gross revenue (₹)",    "Control": f"₹{ctrl_gross:,.0f}",     "Variant": f"₹{var_gross:,.0f}",     "Δ Lift": f"+₹{var_gross-ctrl_gross:,.0f}"},
+        {"Metric": "Margin contribution",  "Control": f"₹{ctrl_margin:,.0f}",    "Variant": f"₹{var_margin:,.0f}",    "Δ Lift": f"+₹{var_margin-ctrl_margin:,.0f}"},
+        {"Metric": "AI + platform costs",  "Control": f"₹{ctrl_total_cost:,.0f}","Variant": f"₹{var_total_cost:,.0f}","Δ Lift": f"₹{var_total_cost-ctrl_total_cost:,.0f}"},
+        {"Metric": "Net recovered (₹)",    "Control": f"₹{ctrl_net:,.0f}",       "Variant": f"₹{var_net:,.0f}",       "Δ Lift": f"+₹{net_lift_inr:,.0f}"},
+        {"Metric": "ROI on AI spend",      "Control": f"{(ctrl_net/ctrl_total_cost*100) if ctrl_total_cost else 0:.0f}%",
+                                            "Variant": f"{roi_pct:.0f}%",          "Δ Lift": ""},
+        {"Metric": "Z-score",              "Control": "—",                         "Variant": f"{z_score:.3f}",         "Δ Lift": "95% CI: " + ("✅" if sig_95 else "❌") + "  99% CI: " + ("✅" if sig_99 else "❌")},
+    ])
+    st.dataframe(fin_df, use_container_width=True, hide_index=True)
+
+    # ── Revenue lift waterfall chart ───────────────────────────────────────────
+    st.markdown("#### Revenue Waterfall: Control → Variant")
+    waterfall_items = [
+        ("Control net revenue",    ctrl_net,                                 C["blue"]),
+        ("+ Recovery lift",        (var_rec - ctrl_rec) * var_avg_amt * discount_mult * margin_pct / 100, C["green"]),
+        ("- Extra AI costs",       -(var_total_cost - ctrl_total_cost),      C["red"]),
+        ("= Variant net revenue",  var_net,                                  C["teal"]),
+    ]
+    fig_wf = go.Figure(go.Bar(
+        x=[w[0] for w in waterfall_items],
+        y=[w[1] for w in waterfall_items],
+        marker_color=[w[2] for w in waterfall_items],
+        text=[f"₹{w[1]:,.0f}" for w in waterfall_items],
+        textposition="outside",
+    ))
+    fig_wf.update_layout(**_PL, height=320, showlegend=False,
+                          yaxis=dict(title="₹", gridcolor=C["border"]),
+                          xaxis=dict(gridcolor=C["border"]))
+    st.plotly_chart(fig_wf, use_container_width=True)
+
+    # ── Sensitivity: what-if discount slider ──────────────────────────────────
+    st.markdown("#### What-if: Discount Sensitivity")
+    disc_range  = list(range(0, 16))
+    net_at_disc = [
+        var_rec * var_avg_amt * (1 - d / 100) * margin_pct / 100 - var_total_cost
+        for d in disc_range
+    ]
+    fig_sens = go.Figure(go.Scatter(
+        x=disc_range, y=net_at_disc, mode="lines+markers",
+        line=dict(color=C["green"], width=2.5),
+        fill="tozeroy", fillcolor="rgba(52,168,83,0.15)",
+        hovertemplate="Discount %{x}% → Net ₹%{y:,.0f}<extra></extra>",
+    ))
+    fig_sens.add_vline(x=discount_avg, line_dash="dash", line_color=C["orange"],
+                       annotation_text=f"Current: {discount_avg}%")
+    fig_sens.update_layout(**_PL, height=260,
+                            xaxis=dict(title="Discount %", gridcolor=C["border"]),
+                            yaxis=dict(title="Net Revenue (₹)", gridcolor=C["border"]))
+    st.plotly_chart(fig_sens, use_container_width=True)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — A/B TESTING ENGINE

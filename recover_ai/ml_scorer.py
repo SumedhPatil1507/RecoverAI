@@ -1,24 +1,27 @@
 """
 RecoverAI Enterprise – ML Recoverability Scorer
 ================================================
-Features:
-  • LightGBM classifier (LogisticRegression fallback) trained on synthetic data
-  • Lazy initialisation — model trains only on first score() call
-  • Kolmogorov-Smirnov drift detection on incoming error-code distributions
-  • Population Stability Index (PSI) on amount buckets
-  • Automatic background retraining when drift exceeds threshold
-  • Hot-swap: new model replaces old one atomically (no server restart)
-  • Thread-safe via RLock + atomic reference swap
+Features
+--------
+• LightGBM classifier (LogisticRegression fallback) trained on synthetic data
+• Lazy initialisation — model trains only on first score() call
+• Sliding-window Kolmogorov-Smirnov drift detection on error-code distributions
+• Population Stability Index (PSI) on transaction-amount distributions
+• Automatic background retraining when drift exceeds threshold
+• Hot-swap: new model replaces old one atomically via os.replace()  (no restart)
+• Thread-safe via RLock + atomic reference swap
+• Optional Celery-backed retrain task when USE_CELERY=1
 
-Drift detection runs every DRIFT_CHECK_INTERVAL_CALLS scoring calls.
-When KS p-value < KS_PVALUE_THRESHOLD OR PSI > PSI_THRESHOLD the retraining
-pipeline is spawned in a daemon thread.
+Drift detection
+---------------
+Runs every DRIFT_CHECK_INTERVAL scoring calls.
+KS p-value < KS_PVALUE_THRESHOLD OR PSI > PSI_THRESHOLD → retraining triggered.
 
 Hot-swap
 --------
-The retrained model is written to a temp file then os.replace() atomically
-swaps it with the live .pkl file.  The in-memory _model reference is updated
-under the write lock so no request ever sees a partially-loaded model.
+Retrained model is written to a temp file, then os.replace() atomically
+swaps it with the live .pkl.  The in-memory _model reference is updated
+under a write-lock so no request ever sees a partially-loaded model.
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ import logging
 import math
 import os
 import pickle
+import sys
 import tempfile
 import threading
 import time
@@ -33,12 +37,16 @@ from collections import deque
 from datetime import datetime
 from typing import Any
 
+_pkg = os.path.dirname(os.path.abspath(__file__))
+if _pkg not in sys.path:
+    sys.path.insert(0, _pkg)
+
 from config import get_settings
 
-logger = logging.getLogger(__name__)
+logger   = logging.getLogger(__name__)
 settings = get_settings()
 
-# ── Error-code → integer category ────────────────────────────────────────────
+# ── Error-code → integer category ─────────────────────────────────────────────
 ERROR_CODE_CATEGORIES: dict[str, int] = {
     "GATEWAY_DOWN":       0,
     "USER_CANCELLED":     1,
@@ -59,21 +67,23 @@ _BASE_RECOVERY_RATES: dict[int, float] = {
     6: 0.35,  # UNKNOWN
 }
 
-# ── Drift-detection tunables (env-override) ───────────────────────────────────
-_DRIFT_CHECK_INTERVAL  = int(os.getenv("DRIFT_CHECK_INTERVAL",   "200"))
-_KS_PVALUE_THRESHOLD   = float(os.getenv("KS_PVALUE_THRESHOLD",  "0.05"))
-_PSI_THRESHOLD         = float(os.getenv("PSI_THRESHOLD",        "0.20"))
-_WINDOW_SIZE           = int(os.getenv("DRIFT_WINDOW_SIZE",       "500"))
+# ── Drift-detection tunables ───────────────────────────────────────────────────
+_DRIFT_CHECK_INTERVAL = int(os.getenv("DRIFT_CHECK_INTERVAL",  "200"))
+_KS_PVALUE_THRESHOLD  = float(os.getenv("KS_PVALUE_THRESHOLD", "0.05"))
+_PSI_THRESHOLD        = float(os.getenv("PSI_THRESHOLD",        "0.20"))
+_WINDOW_SIZE          = int(os.getenv("DRIFT_WINDOW_SIZE",      "500"))
 
 
-# ── Feature builders ──────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Feature builders
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_features(
     amount_rupees: float,
     error_code: str | None,
     hour_of_day: int,
     retry_count: int,
-) -> "Any":                     # np.ndarray
+) -> Any:  # np.ndarray
     import numpy as np
     code_cat = ERROR_CODE_CATEGORIES.get(
         (error_code or "UNKNOWN").upper().replace(" ", "_"), 6
@@ -81,13 +91,13 @@ def _build_features(
     return np.array([[amount_rupees, code_cat, hour_of_day, retry_count]], dtype=np.float32)
 
 
-def _generate_training_data(n: int = 500) -> "tuple[Any, Any]":
+def _generate_training_data(n: int = 500) -> tuple[Any, Any]:
     import numpy as np
-    rng    = np.random.default_rng(42)
-    amounts    = rng.uniform(500, 15_000, n).astype(np.float32)
-    categories = rng.integers(0, 7, n)
-    hours      = rng.integers(0, 24, n)
-    retries    = rng.integers(0, 3, n)
+    rng           = np.random.default_rng(42)
+    amounts       = rng.uniform(500, 15_000, n).astype(np.float32)
+    categories    = rng.integers(0, 7, n)
+    hours         = rng.integers(0, 24, n)
+    retries       = rng.integers(0, 3, n)
 
     base_prob     = np.array([_BASE_RECOVERY_RATES[c] for c in categories])
     amount_bonus  = np.clip(0.1 * np.sin(np.pi * (amounts - 500) / 14_500), -0.05, 0.10)
@@ -96,7 +106,7 @@ def _generate_training_data(n: int = 500) -> "tuple[Any, Any]":
 
     prob   = np.clip(base_prob + amount_bonus + hour_bonus - retry_penalty, 0.02, 0.98)
     labels = rng.binomial(1, prob).astype(np.float32)
-    X = np.column_stack([amounts, categories, hours, retries]).astype(np.float32)
+    X      = np.column_stack([amounts, categories, hours, retries]).astype(np.float32)
     return X, labels
 
 
@@ -112,29 +122,31 @@ def _train_model() -> Any:
             colsample_bytree=0.8, random_state=42, verbose=-1,
         )
         model.fit(X, y)
-        logger.info("LightGBM trained successfully (fast mode).")
+        logger.info("LightGBM trained successfully.")
         return model
     except ImportError:
-        logger.warning("LightGBM not available; training LogisticRegression fallback.")
+        logger.warning("LightGBM not available — falling back to LogisticRegression.")
         from sklearn.linear_model import LogisticRegression
         from sklearn.pipeline import Pipeline
         from sklearn.preprocessing import StandardScaler
         model = Pipeline([
             ("scaler", StandardScaler()),
-            ("clf", LogisticRegression(max_iter=300, random_state=42)),
+            ("clf",    LogisticRegression(max_iter=300, random_state=42)),
         ])
         model.fit(X, y)
-        logger.info("Logistic regression fallback trained.")
+        logger.info("LogisticRegression fallback trained.")
         return model
 
 
-# ── Drift detection helpers ───────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Drift detection helpers
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _ks_statistic(sample_a: list[float], sample_b: list[float]) -> tuple[float, float]:
     """
     Two-sample Kolmogorov-Smirnov test.
     Returns (ks_statistic, p_value).
-    Uses scipy when available, falls back to a simplified approximation.
+    Uses scipy when available; falls back to a pure-Python approximation.
     """
     if len(sample_a) < 10 or len(sample_b) < 10:
         return 0.0, 1.0
@@ -146,13 +158,12 @@ def _ks_statistic(sample_a: list[float], sample_b: list[float]) -> tuple[float, 
     except ImportError:
         pass
 
-    # Simplified KS approximation (no scipy)
-    n, m = len(sample_a), len(sample_b)
+    # Pure-Python KS approximation
+    n, m   = len(sample_a), len(sample_b)
     sa, sb = sorted(sample_a), sorted(sample_b)
-    i = j = 0
+    i = j  = 0
     max_diff = 0.0
-    all_vals = sorted(set(sa + sb))
-    for v in all_vals:
+    for v in sorted(set(sa + sb)):
         while i < n and sa[i] <= v:
             i += 1
         while j < m and sb[j] <= v:
@@ -161,9 +172,8 @@ def _ks_statistic(sample_a: list[float], sample_b: list[float]) -> tuple[float, 
         if diff > max_diff:
             max_diff = diff
 
-    # Kolmogorov distribution approximation for p-value
-    en = math.sqrt(n * m / (n + m))
-    t  = (en + 0.12 + 0.11 / en) * max_diff
+    en   = math.sqrt(n * m / (n + m))
+    t    = (en + 0.12 + 0.11 / en) * max_diff
     pval = max(0.0, 2.0 * math.exp(-2.0 * t * t))
     return max_diff, pval
 
@@ -171,9 +181,10 @@ def _ks_statistic(sample_a: list[float], sample_b: list[float]) -> tuple[float, 
 def _psi(reference: list[float], current: list[float], buckets: int = 10) -> float:
     """
     Population Stability Index for amount distribution.
-    PSI < 0.1  → no shift
-    PSI 0.1–0.2 → moderate shift
-    PSI > 0.2  → significant shift → trigger retraining
+
+    PSI < 0.10  → no shift
+    0.10–0.20  → moderate shift
+    > 0.20     → significant shift → trigger retraining
     """
     if len(reference) < 10 or len(current) < 10:
         return 0.0
@@ -182,8 +193,6 @@ def _psi(reference: list[float], current: list[float], buckets: int = 10) -> flo
     max_v = max(max(reference), max(current))
     if max_v == min_v:
         return 0.0
-
-    edges = [min_v + i * (max_v - min_v) / buckets for i in range(buckets + 1)]
 
     def bucket_pct(data: list[float]) -> list[float]:
         counts = [0] * buckets
@@ -195,63 +204,55 @@ def _psi(reference: list[float], current: list[float], buckets: int = 10) -> flo
 
     ref_pct = bucket_pct(reference)
     cur_pct = bucket_pct(current)
-    psi = sum(
-        (cur - ref) * math.log(cur / ref)
-        for ref, cur in zip(ref_pct, cur_pct)
-    )
+    psi     = sum((c - r) * math.log(c / r) for r, c in zip(ref_pct, cur_pct))
     return round(psi, 4)
 
 
-# ── Calibration validator ─────────────────────────────────────────────────────
-
 def _validate_calibration(model: Any) -> float:
-    """
-    Quick Brier score validation on held-out synthetic data.
-    Brier < 0.25 → accept model.  Returns Brier score.
-    """
+    """Brier score on held-out synthetic data. Brier < 0.30 → accept model."""
     import numpy as np
     X_val, y_val = _generate_training_data(200)
     try:
         probs = model.predict_proba(X_val)[:, 1]
         brier = float(np.mean((probs - y_val) ** 2))
-        logger.info("Model calibration Brier score: %.4f", brier)
+        logger.info("Calibration Brier score: %.4f", brier)
         return brier
     except Exception as exc:
         logger.warning("Calibration check failed: %s", exc)
         return 1.0
 
 
-# ── Main scorer class ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main scorer class
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class MLRecoveryScorer:
     """
-    Thread-safe ML inference pipeline with:
-      • Lazy initialisation (model trains on first score() call)
-      • Sliding-window drift detection (KS test + PSI)
-      • Automatic background retraining on drift
-      • Hot-swap: new model replaces old atomically without restart
+    Thread-safe ML inference pipeline.
+
+    • Lazy init — model trains on first score() call
+    • Sliding-window KS drift detection + PSI
+    • Background retraining on drift (thread or Celery task)
+    • Atomic hot-swap via os.replace()
     """
 
-    _instance: "MLRecoveryScorer | None" = None
-    _singleton_lock = threading.Lock()
+    _instance:       "MLRecoveryScorer | None" = None
+    _singleton_lock: threading.Lock            = threading.Lock()
 
     def __init__(self) -> None:
-        self._model:      Any      = None
-        self._ready:      bool     = False
-        self._rw_lock:    threading.RLock = threading.RLock()
-        self._init_lock:  threading.Lock  = threading.Lock()
+        self._model:     Any             = None
+        self._ready:     bool            = False
+        self._rw_lock:   threading.RLock = threading.RLock()
+        self._init_lock: threading.Lock  = threading.Lock()
 
-        # Drift detection sliding windows
-        self._ref_error_codes: list[int]   = []   # training distribution
-        self._ref_amounts:     list[float] = []
-        self._live_error_codes: deque[int]   = deque(maxlen=_WINDOW_SIZE)
-        self._live_amounts:     deque[float] = deque(maxlen=_WINDOW_SIZE)
+        self._ref_error_codes:   list[int]    = []
+        self._ref_amounts:       list[float]  = []
+        self._live_error_codes:  deque[int]   = deque(maxlen=_WINDOW_SIZE)
+        self._live_amounts:      deque[float] = deque(maxlen=_WINDOW_SIZE)
 
-        # State
-        self._call_count:      int   = 0
-        self._retraining:      bool  = False
-        self._last_drift_check: float = 0.0
-        self._drift_log: list[dict]  = []          # history for dashboard
+        self._call_count: int        = 0
+        self._retraining: bool       = False
+        self._drift_log:  list[dict] = []
 
     # ── Singleton ─────────────────────────────────────────────────────────────
 
@@ -263,7 +264,7 @@ class MLRecoveryScorer:
                     cls._instance = cls()
         return cls._instance
 
-    # ── Initialisation ────────────────────────────────────────────────────────
+    # ── Init ──────────────────────────────────────────────────────────────────
 
     def ensure_ready(self) -> None:
         if not self._ready:
@@ -284,7 +285,7 @@ class MLRecoveryScorer:
                 logger.info("ML model loaded from %s", path)
                 return
             except Exception as exc:
-                logger.warning("Failed to load ML model (%s); retraining.", exc)
+                logger.warning("Failed to load ML model (%s) — retraining.", exc)
 
         model = _train_model()
         with self._rw_lock:
@@ -292,7 +293,7 @@ class MLRecoveryScorer:
         self._persist_model(model)
 
     def _persist_model(self, model: Any) -> None:
-        """Persist model to disk with atomic hot-swap."""
+        """Atomic hot-swap: write to temp file then os.replace()."""
         path = settings.ml_model_path
         try:
             fd, tmp_path = tempfile.mkstemp(
@@ -301,52 +302,42 @@ class MLRecoveryScorer:
             )
             with os.fdopen(fd, "wb") as f:
                 pickle.dump(model, f)
-            os.replace(tmp_path, path)     # atomic on POSIX; best-effort on Windows
+            os.replace(tmp_path, path)
             logger.info("ML model hot-swapped to %s", path)
         except Exception as exc:
             logger.warning("Could not persist ML model: %s", exc)
 
     def _seed_reference_distribution(self) -> None:
-        """Build reference feature distribution from training data."""
         import numpy as np
-        rng        = np.random.default_rng(0)
-        n          = 1000
-        categories = list(rng.integers(0, 7, n))
-        amounts    = list(rng.uniform(500, 15_000, n))
-        self._ref_error_codes = categories
-        self._ref_amounts     = amounts
+        rng                   = np.random.default_rng(0)
+        n                     = 1000
+        self._ref_error_codes = list(map(int, rng.integers(0, 7, n)))
+        self._ref_amounts     = list(map(float, rng.uniform(500, 15_000, n)))
         logger.debug("Reference distribution seeded with %d samples.", n)
 
     # ── Drift detection ───────────────────────────────────────────────────────
 
     def _check_and_trigger_drift(self) -> None:
-        """Run KS + PSI drift checks; spawn retraining thread if drift detected."""
-        if self._retraining:
-            return
-        if len(self._live_error_codes) < 50:
+        if self._retraining or len(self._live_error_codes) < 50:
             return
 
         live_codes   = list(self._live_error_codes)
         live_amounts = list(self._live_amounts)
 
-        # KS test on error-code distribution (treat as float)
         ks_stat, ks_pval = _ks_statistic(
             [float(c) for c in self._ref_error_codes],
             [float(c) for c in live_codes],
         )
-
-        # PSI on amount distribution
-        psi = _psi(self._ref_amounts, live_amounts)
-
-        drift_detected = (ks_pval < _KS_PVALUE_THRESHOLD) or (psi > _PSI_THRESHOLD)
+        psi             = _psi(self._ref_amounts, live_amounts)
+        drift_detected  = (ks_pval < _KS_PVALUE_THRESHOLD) or (psi > _PSI_THRESHOLD)
 
         entry = {
-            "timestamp":     datetime.utcnow().isoformat(),
-            "ks_stat":       round(ks_stat, 4),
-            "ks_pval":       round(ks_pval, 4),
-            "psi":           round(psi, 4),
-            "drift":         drift_detected,
-            "window_size":   len(live_codes),
+            "timestamp":   datetime.utcnow().isoformat(),
+            "ks_stat":     round(ks_stat, 4),
+            "ks_pval":     round(ks_pval, 4),
+            "psi":         round(psi, 4),
+            "drift":       drift_detected,
+            "window_size": len(live_codes),
         }
         self._drift_log.append(entry)
         if len(self._drift_log) > 100:
@@ -358,16 +349,27 @@ class MLRecoveryScorer:
         )
 
         if drift_detected:
-            logger.warning(
-                "DRIFT DETECTED (KS_p=%.4f PSI=%.4f) — spawning background retraining",
-                ks_pval, psi,
-            )
+            logger.warning("DRIFT DETECTED — spawning background retraining")
             self._retraining = True
-            t = threading.Thread(target=self._retrain_and_swap, daemon=True)
-            t.start()
+
+            # Prefer Celery task; fall back to daemon thread
+            _dispatched = False
+            if os.getenv("USE_CELERY", "0") == "1":
+                try:
+                    # Lazy import to avoid circular dependency at module load
+                    from celery import current_app as _celery_current_app
+                    _celery_current_app.send_task("recoverai.retrain_model")
+                    _dispatched = True
+                    logger.info("Celery retrain task dispatched")
+                except Exception as exc:
+                    logger.warning("Celery dispatch failed (%s) — using thread", exc)
+
+            if not _dispatched:
+                t = threading.Thread(target=self._retrain_and_swap, daemon=True)
+                t.start()
 
     def _retrain_and_swap(self) -> None:
-        """Background thread: retrain, validate calibration, hot-swap."""
+        """Thread-based retraining: retrain, validate, hot-swap."""
         try:
             logger.info("Background retraining started…")
             t0    = time.time()
@@ -375,25 +377,19 @@ class MLRecoveryScorer:
             brier = _validate_calibration(model)
 
             if brier > 0.30:
-                logger.warning(
-                    "Retrained model rejected (Brier=%.4f > 0.30). Keeping current model.",
-                    brier,
-                )
+                logger.warning("Retrained model rejected (Brier=%.4f > 0.30).", brier)
                 return
 
-            # Hot-swap
             with self._rw_lock:
                 self._model = model
             self._persist_model(model)
 
-            # Reset reference distribution to current live window
             self._ref_error_codes = list(self._live_error_codes)
             self._ref_amounts     = list(self._live_amounts)
 
-            elapsed = time.time() - t0
             logger.info(
-                "Hot-swap complete in %.1fs (Brier=%.4f). Model updated without restart.",
-                elapsed, brier,
+                "Hot-swap complete in %.1fs (Brier=%.4f).",
+                time.time() - t0, brier,
             )
         except Exception as exc:
             logger.error("Retraining failed: %s", exc, exc_info=True)
@@ -401,28 +397,25 @@ class MLRecoveryScorer:
             self._retraining = False
 
     def get_drift_log(self) -> list[dict]:
-        """Return recent drift-check history for the dashboard."""
         return list(self._drift_log)
 
-    # ── Scoring ───────────────────────────────────────────────────────────────
+    # ── Inference ─────────────────────────────────────────────────────────────
 
     def score(
         self,
         amount_rupees: float,
-        error_code: str | None,
-        retry_count: int = 0,
-        hour_of_day: int | None = None,
+        error_code:    str | None,
+        retry_count:   int   = 0,
+        hour_of_day:   int | None = None,
     ) -> float:
         """
         Returns recoverability_score ∈ [0.00, 1.00].
-        Thread-safe; never raises — returns 0.5 on any unexpected error.
-        Records features in sliding window and triggers drift checks.
+        Thread-safe; never raises — returns 0.5 on unexpected errors.
         """
         self.ensure_ready()
         if hour_of_day is None:
             hour_of_day = datetime.utcnow().hour
 
-        # Record for drift detection
         code_cat = ERROR_CODE_CATEGORIES.get(
             (error_code or "UNKNOWN").upper().replace(" ", "_"), 6
         )
@@ -453,3 +446,48 @@ class MLRecoveryScorer:
     @property
     def call_count(self) -> int:
         return self._call_count
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Celery retrain task (registered lazily to avoid circular imports)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def register_celery_tasks(app: Any) -> None:
+    """
+    Register the ``recoverai.retrain_model`` Celery task.
+
+    Call this from the Celery worker entry-point after the app is configured,
+    NOT at module import time — avoids circular imports with queue_worker.py.
+
+    Example::
+        from queue_worker import _celery_app
+        from ml_scorer import register_celery_tasks
+        register_celery_tasks(_celery_app)
+    """
+
+    @app.task(
+        name="recoverai.retrain_model",
+        max_retries=1,
+        soft_time_limit=300,
+        time_limit=360,
+    )
+    def _celery_retrain_model() -> dict[str, float]:
+        """Celery task: retrain + hot-swap the recoverability model."""
+        t0     = time.time()
+        scorer = MLRecoveryScorer.get()
+        scorer._retraining = True
+        try:
+            model = _train_model()
+            brier = _validate_calibration(model)
+            if brier <= 0.30:
+                with scorer._rw_lock:
+                    scorer._model = model
+                scorer._persist_model(model)
+                scorer._ref_error_codes = list(scorer._live_error_codes)
+                scorer._ref_amounts     = list(scorer._live_amounts)
+                logger.info("Celery retrain: hot-swap complete Brier=%.4f", brier)
+            else:
+                logger.warning("Celery retrain: model rejected Brier=%.4f > 0.30", brier)
+            return {"brier_score": brier, "elapsed_seconds": round(time.time() - t0, 2)}
+        finally:
+            scorer._retraining = False
