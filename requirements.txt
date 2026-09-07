@@ -51,6 +51,7 @@ tenacity>=8.0.0
 # ── Security ──────────────────────────────────────────────────────────────────
 # cryptography: future Vault / JWT integration; safe to keep floor-pinned
 cryptography>=42.0.0
+PyJWT>=2.8.0
 
 # ── Dev / CI tooling (install with: pip install -r requirements.txt -r requirements-dev.txt) ──
 # Kept separate so production images stay lean.

@@ -57,6 +57,11 @@ _MAX_RETRIES    = 3
 _BACKOFF_BASE   = 2.0              # seconds; attempt n waits base^n
 
 
+def production_queue_ready() -> bool:
+    """Return whether the configured production transport is available."""
+    return (not settings.is_production) or (_USE_CELERY and _CELERY_AVAILABLE)
+
+
 # ── Job definition ────────────────────────────────────────────────────────────
 
 @dataclass(slots=True)
@@ -232,6 +237,10 @@ async def enqueue(job: PaymentJob) -> bool:
       • Non-blocking put_nowait into asyncio.Queue.
       • Returns False and logs an error when the in-process queue is full.
     """
+    if settings.is_production and not (_USE_CELERY and _CELERY_AVAILABLE):
+        logger.error("Distributed queue is mandatory in production; rejecting %s", job.payment_id)
+        return False
+
     if _USE_CELERY and _CELERY_AVAILABLE:
         try:
             _process_payment_celery.apply_async(

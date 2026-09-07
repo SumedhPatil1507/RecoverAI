@@ -23,7 +23,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import random
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -41,6 +40,7 @@ from tenacity import (
 
 import database as db
 from config import get_settings
+from expected_value import calculate_expected_value
 from ml_scorer import MLRecoveryScorer
 from schemas import (
     AuditSource,
@@ -531,12 +531,28 @@ async def process_failed_payment(
         # ── Node 8: Dispatch Recovery ─────────────────────────────────────────
         with _tracer.start_as_current_span("node.dispatch") as disp_span:
             final_status = decision.new_status
-            if decision.new_status == TransactionStatus.ACTION_TRIGGERED:
-                recovery_succeeded = random.random() < (0.30 + score * 0.45)
-                final_status = (
-                    TransactionStatus.RECOVERED if recovery_succeeded
-                    else TransactionStatus.RECOVERING
+            ev = calculate_expected_value(
+                probability=score,
+                recoverable_amount_paise=amount_paise,
+                operational_fee_paise=settings.operational_fee_paise,
+                gateway_cost_paise=settings.gateway_cost_paise,
+            )
+            disp_span.set_attribute("expected_value_paise", float(ev.expected_value_paise))
+            if not ev.allowed:
+                final_status = TransactionStatus.LOW_PRIORITY_SKIP
+                db.update_transaction(payment_id, final_status.value, recoverability_score=score)
+                db.append_audit_log(
+                    payment_id, "EV_BYPASS",
+                    f"EV={ev.expected_value_paise} paise; reason={ev.reason}; "
+                    f"probability={ev.probability}; recoverable={ev.recoverable_amount_paise}; "
+                    f"fees={ev.operational_fee_paise + ev.gateway_cost_paise}",
+                    AuditSource.SYSTEM.value, score,
                 )
+                logger.info("Txn %s bypassed by EV gate (%s)", payment_id, ev.reason)
+                return
+
+            # Live outcomes are not simulated. The provider callback owns recovery truth.
+            final_status = TransactionStatus.ACTION_TRIGGERED
             disp_span.set_attribute("final_status", final_status.value)
             disp_span.set_attribute("recovered",
                                     final_status == TransactionStatus.RECOVERED)
@@ -554,9 +570,16 @@ async def process_failed_payment(
             )
 
             if final_status in (TransactionStatus.ACTION_TRIGGERED,
-                                 TransactionStatus.RECOVERING):
+                                 TransactionStatus.RECOVERING) and settings.execution_mode == "LIVE":
                 await _create_and_dispatch_link(
                     payment_id, amount_paise, email_redacted, failure_reason
+                )
+            elif settings.execution_mode == "SHADOW":
+                db.append_audit_log(
+                    payment_id, "SHADOW_DISPATCH_INTERCEPTED",
+                    f"Counterfactual action={decision.action.value}; provider dispatch suppressed; "
+                    f"EV={ev.expected_value_paise} paise",
+                    AuditSource.SYSTEM.value, score,
                 )
 
         # ── Node 9: Cryptographic Audit Log ───────────────────────────────────

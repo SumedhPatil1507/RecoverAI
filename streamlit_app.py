@@ -196,10 +196,11 @@ with st.sidebar:
         st.rerun()
     st.divider()
     st.caption(f"**DB:** `{_settings.database_path}`")
+    st.caption(f"**Execution:** `{_settings.execution_mode}`")
     st.caption(f"**ML threshold:** {_settings.ml_low_priority_threshold}")
     st.caption(f"**Max discount:** {_settings.max_discount_pct}%")
     st.divider()
-    st.caption("**Stack:** SQLite WAL · LightGBM · SHA-256 · Streamlit · Plotly")
+    st.caption("**Stack:** SQLite demo store · LightGBM · SHA-256 · Shadow mode · Plotly")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _kpi(col, label, value, sub, colour="#ffffff"):
