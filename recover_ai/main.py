@@ -38,7 +38,6 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 import database as db
 import queue_worker as qw
 from config import get_settings
-from auth import Principal, decode_bearer_token
 from schemas import (
     HealthResponse,
     HITLDecision,
