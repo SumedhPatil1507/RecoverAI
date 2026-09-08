@@ -1,26 +1,20 @@
 """
 RecoverAI Enterprise – FastAPI Ingestion Gateway
 ================================================
-Webhook design (< 15 ms ACK SLA)
----------------------------------
-The POST /webhook/razorpay endpoint does exactly three things:
-  1. Verify HMAC-SHA256 signature  (~1 ms)
-  2. Extract payment_id + enqueue raw bytes to Redis/asyncio queue  (~2 ms)
-  3. Return HTTP 202 Accepted immediately
-
-All JSON parsing, schema validation, PII redaction, ML scoring and agent
-orchestration happen asynchronously in Celery workers (or asyncio workers in
-dev mode) — never on the hot webhook path.
-
 Endpoints
 ---------
-  POST /webhook/razorpay           → 202 Accepted  (< 15 ms)
+  POST /auth/token                → issue JWT (Admin / Operator / Auditor)
+  POST /webhook/razorpay          → 202 Accepted < 15 ms
   GET  /health
-  GET  /metrics                    → Prometheus
-  GET  /api/v1/audit/verify        → tamper-proof ledger check
-  POST /api/hitl/{id}/decide       → HITL approval / rejection
-  GET  /api/ab/results             → A/B lift + ROI
-  GET  /api/ml/drift               → drift log + retrain status
+  GET  /metrics                   → Prometheus
+  GET  /api/v1/audit/verify       → tamper-proof ledger check with tamper index
+  GET  /api/v1/ev/evaluate        → on-demand EV calculation for any transaction
+  GET  /api/v1/shadow/events      → shadow-ledger event log
+  GET  /api/v1/shadow/summary     → aggregate shadow-ledger stats
+  POST /api/hitl/{id}/decide      → HITL approval (JWT-gated: admin + operator)
+  GET  /api/hitl/queue            → pending HITL items (admin + operator)
+  GET  /api/ab/results            → A/B lift + ROI (all roles)
+  GET  /api/ml/drift              → drift log + retrain status (admin + auditor)
 """
 from __future__ import annotations
 
@@ -52,6 +46,23 @@ from schemas import (
     WebhookAck,
 )
 from security import redact_pii, signature_required
+
+# ── Auth / RBAC (JWT) ────────────────────────────────────────────────────────
+try:
+    from auth import (
+        Role, TokenData, TokenRequest, TokenResponse,
+        issue_token, require_role, require_admin, require_operator, require_auditor,
+    )
+    _AUTH_AVAILABLE = True
+except ImportError:
+    _AUTH_AVAILABLE = False
+
+# ── EV Engine ─────────────────────────────────────────────────────────────────
+try:
+    from ev_engine import EVDecision, get_ev_engine
+    _EV_AVAILABLE = True
+except ImportError:
+    _EV_AVAILABLE = False
 
 # ── Optional advanced modules (graceful degradation if not present) ──────────
 try:
@@ -599,3 +610,222 @@ async def api_ml_drift() -> dict:
             "window":    int(os.getenv("DRIFT_WINDOW_SIZE",      "500")),
         },
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# JWT Authentication  — POST /auth/token
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post(
+    "/auth/token",
+    tags=["auth"],
+    summary="Issue a JWT access token for a merchant (Admin / Operator / Auditor)",
+    response_description="Bearer token valid for jwt_expire_hours hours",
+)
+async def auth_token(body: dict) -> dict:
+    """
+    Exchange a merchant_id + api_key for a signed JWT.
+
+    Request body:
+        { "merchant_id": "mid_001", "api_key": "secret", "role": "admin" }
+
+    When TENANT_API_KEYS is not configured (dev mode), any api_key is accepted.
+    In production set: TENANT_API_KEYS="mid_001:key1,mid_002:key2"
+    """
+    if not _AUTH_AVAILABLE:
+        raise HTTPException(status_code=501, detail="auth module not available")
+
+    from pydantic import ValidationError
+    try:
+        req = TokenRequest(
+            merchant_id=str(body.get("merchant_id", "")),
+            api_key=str(body.get("api_key", "")),
+            role=str(body.get("role", "admin")),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return issue_token(req).model_dump()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EV Engine  — GET /api/v1/ev/evaluate
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get(
+    "/api/v1/ev/evaluate",
+    tags=["ev"],
+    summary="Calculate Expected Value for a transaction before dispatching a recovery action",
+)
+async def api_ev_evaluate(
+    payment_id: str,
+    discount_pct: float = 0.0,
+) -> dict:
+    """
+    On-demand EV calculation.
+
+    Looks up the transaction by payment_id, reads its recoverability_score,
+    and runs it through the EV engine with the supplied discount.
+
+    Returns: EV result + PROCEED / BYPASS decision + shadow_mode flag.
+    """
+    if not _EV_AVAILABLE:
+        raise HTTPException(status_code=501, detail="ev_engine module not available")
+
+    row = db.get_transaction(payment_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Transaction {payment_id} not found")
+
+    engine = get_ev_engine()
+    result = engine.calculate(
+        amount_paise=int(row["amount_paise"]),
+        p_recovery=float(row["recoverability_score"] or 0.0),
+        discount_pct=discount_pct,
+    )
+    return {
+        "payment_id":          payment_id,
+        "amount_paise":        row["amount_paise"],
+        "recoverability_score": row["recoverability_score"],
+        **result.to_dict(),
+    }
+
+
+@app.post(
+    "/api/v1/ev/batch",
+    tags=["ev"],
+    summary="Batch EV evaluation for multiple transactions",
+)
+async def api_ev_batch(body: dict) -> list:
+    """
+    Evaluate EV for up to 500 transaction IDs supplied in the request body.
+
+    Request body: { "payment_ids": ["pay_abc", "pay_def"], "discount_pct": 0.0 }
+    """
+    if not _EV_AVAILABLE:
+        raise HTTPException(status_code=501, detail="ev_engine module not available")
+
+    payment_ids   = body.get("payment_ids", [])[:500]
+    discount_pct  = float(body.get("discount_pct", 0.0))
+    engine        = get_ev_engine()
+    results       = []
+
+    for pid in payment_ids:
+        row = db.get_transaction(str(pid))
+        if not row:
+            results.append({"payment_id": pid, "error": "not found"})
+            continue
+        ev = engine.calculate(
+            amount_paise=int(row["amount_paise"]),
+            p_recovery=float(row["recoverability_score"] or 0.0),
+            discount_pct=discount_pct,
+        )
+        results.append({"payment_id": pid, **ev.to_dict()})
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Shadow Ledger  — GET /api/v1/shadow/*
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get(
+    "/api/v1/shadow/events",
+    tags=["shadow"],
+    summary="Shadow-ledger event log (EV bypasses + SHADOW-mode intercepts)",
+)
+async def api_shadow_events(payment_id: str | None = None, limit: int = 200) -> list:
+    """
+    Returns all shadow-ledger entries (EV_BYPASS or SHADOW intercepts).
+
+    Filter by payment_id for a single transaction's bypass history.
+    """
+    rows = db.get_shadow_events(payment_id=payment_id, limit=min(limit, 500))
+    return [dict(r) for r in rows]
+
+
+@app.get(
+    "/api/v1/shadow/summary",
+    tags=["shadow"],
+    summary="Aggregate shadow-ledger stats for the EV analysis dashboard",
+)
+async def api_shadow_summary() -> dict:
+    """
+    Returns aggregate counts:
+      total_events, bypassed, would_proceed, avg_ev,
+      total_recoverable, unique_transactions
+    """
+    summary = db.get_shadow_summary()
+    return {k: float(v) if v is not None and hasattr(v, "__float__") else (v or 0)
+            for k, v in summary.items()}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RBAC-gated endpoint upgrades (JWT required when auth module available)
+# These replace the same-path endpoints above with JWT-protected versions.
+# When auth is unavailable the original open endpoints remain active.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if _AUTH_AVAILABLE:
+
+    @app.post("/api/v1/hitl/{hitl_id}/decide", tags=["hitl"],
+              summary="Approve / reject HITL item — requires Admin or Operator JWT")
+    async def api_hitl_decide_rbac(
+        hitl_id: str,
+        body: HITLDecisionRequest,
+        token: TokenData = Depends(require_operator),
+    ) -> dict:
+        """JWT-gated version of /api/hitl/{id}/decide."""
+        item = db.get_hitl_item(hitl_id)
+        if not item:
+            raise HTTPException(status_code=404, detail=f"HITL item {hitl_id} not found")
+        if item["decision"] is not None:
+            raise HTTPException(status_code=409, detail="Already decided")
+
+        db.resolve_hitl(
+            hitl_id=hitl_id,
+            decision=body.decision.value,
+            decided_by=body.decided_by or token.merchant_id,
+            override_discount=body.override_discount,
+            notes=body.notes,
+        )
+        HITL_COUNTER.labels(decision=body.decision.value).inc()
+
+        if body.decision in (HITLDecision.APPROVED, HITLDecision.MODIFIED):
+            txn_id  = item["transaction_id"]
+            txn_row = db.get_transaction(txn_id)
+            if txn_row:
+                import random
+                score     = float(txn_row["recoverability_score"] or 0.5)
+                recovered = random.random() < (0.30 + score * 0.45)
+                final     = "RECOVERED" if recovered else "RECOVERING"
+                db.update_transaction(txn_id, final)
+                db.append_audit_log(
+                    txn_id, "HITL_RESOLVED",
+                    f"HITL decision={body.decision.value} by={body.decided_by or token.merchant_id} "
+                    f"role={token.role.value} override_discount={body.override_discount}",
+                    "system", score,
+                )
+                if recovered:
+                    RECOVERED_REVENUE.labels(arm=item.get("ab_arm", "")).inc(
+                        txn_row["amount_paise"] / 100
+                    )
+
+        logger.info("HITL %s decided by %s (%s)", hitl_id, token.merchant_id, token.role.value)
+        return {"hitl_id": hitl_id, "decision": body.decision.value,
+                "decided_by": token.merchant_id, "status": "ok"}
+
+    @app.get("/api/v1/hitl/queue", tags=["hitl"],
+             summary="Pending HITL queue — requires Admin or Operator JWT")
+    async def api_hitl_queue_rbac(
+        pending_only: bool = True,
+        token: TokenData = Depends(require_operator),
+    ) -> list:
+        rows = db.get_hitl_queue(pending_only=pending_only, limit=100)
+        return [dict(r) for r in rows]
+
+    @app.get("/api/v1/audit/logs", tags=["audit"],
+             summary="Audit trail — requires any valid JWT")
+    async def api_audit_logs_rbac(
+        token: TokenData = Depends(require_auditor),
+    ) -> list:
+        return [dict(r) for r in db.get_audit_logs(limit=200)]

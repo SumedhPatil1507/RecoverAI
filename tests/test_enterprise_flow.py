@@ -56,7 +56,9 @@ os.environ.setdefault("AUDIT_HMAC_KEY",          _TEST_SECRET)
 os.environ.setdefault("COLUMN_ENCRYPTION_KEY",   "a" * 64)   # 64 hex chars = 32 bytes
 
 # Use a temp DB so tests never touch the real database
-_TMP_DB = tempfile.mktemp(suffix=".db")
+# Each test module gets its own temp DB — prevents cross-module contamination
+# when pytest collects both test files in the same process.
+_TMP_DB = tempfile.mktemp(suffix="_flow_test.db")
 os.environ["DATABASE_PATH"] = _TMP_DB
 
 
@@ -242,8 +244,22 @@ class TestAuditChain:
     """SHA-256 hash-chain + HMAC-per-row integrity and tamper detection."""
 
     def setup_method(self) -> None:
-        import database as db
-        db.init_db()
+        import database as _db
+        # Reset the thread-local connection so we always use this module's DB path
+        if hasattr(_db._local, "conn"):
+            try:
+                _db._local.conn.close()
+            except Exception:
+                pass
+            del _db._local.conn
+        os.environ["DATABASE_PATH"] = _TMP_DB
+        try:
+            from config import get_settings
+            get_settings.cache_clear()
+            _db.settings = get_settings()
+        except Exception:
+            pass
+        _db.init_db()
 
     def test_empty_ledger_ok(self) -> None:
         import database as db

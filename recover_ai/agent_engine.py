@@ -528,36 +528,92 @@ async def process_failed_payment(
                 logger.info("Txn %s → HITL queue (reason=%s)", payment_id, hitl_reason.value)
                 return
 
-        # ── Node 8: Dispatch Recovery ─────────────────────────────────────────
-        with _tracer.start_as_current_span("node.dispatch") as disp_span:
-            final_status = decision.new_status
-            if decision.new_status == TransactionStatus.ACTION_TRIGGERED:
-                recovery_succeeded = random.random() < (0.30 + score * 0.45)
-                final_status = (
-                    TransactionStatus.RECOVERED if recovery_succeeded
-                    else TransactionStatus.RECOVERING
-                )
-            disp_span.set_attribute("final_status", final_status.value)
-            disp_span.set_attribute("recovered",
-                                    final_status == TransactionStatus.RECOVERED)
+        # ── Node 8: EV Gate + Dispatch Recovery ──────────────────────────────
+        with _tracer.start_as_current_span("node.ev_dispatch") as disp_span:
+            # Calculate Expected Value before consuming any dispatch resources
+            from ev_engine import EVDecision, get_ev_engine
+            from ev_engine import get_execution_mode, ExecutionMode
+            import uuid as _uuid
 
-            db.update_transaction(
-                payment_id, final_status.value,
-                failure_category=category.value,
-                recoverability_score=score,
-            )
-            db.increment_attempts(payment_id)
-            db.record_ab_outcome(
-                arm=ab_arm,
-                recovered=(final_status == TransactionStatus.RECOVERED),
+            ev_engine = get_ev_engine()
+            ev_result = ev_engine.calculate(
                 amount_paise=amount_paise,
+                p_recovery=score,
+                discount_pct=decision.discount_pct,
             )
 
-            if final_status in (TransactionStatus.ACTION_TRIGGERED,
-                                 TransactionStatus.RECOVERING):
-                await _create_and_dispatch_link(
-                    payment_id, amount_paise, email_redacted, failure_reason
+            disp_span.set_attribute("ev_rupees",   float(ev_result.ev_rupees))
+            disp_span.set_attribute("ev_decision", ev_result.decision.value)
+            disp_span.set_attribute("shadow_mode", ev_result.shadow_mode)
+
+            if ev_result.decision == EVDecision.BYPASS:
+                # EV non-positive or SHADOW mode — intercept dispatch, log reason
+                bypass_status = TransactionStatus.EV_BYPASSED
+                db.update_transaction(
+                    payment_id, bypass_status.value,
+                    failure_category=category.value,
+                    recoverability_score=score,
                 )
+                db.increment_attempts(payment_id)
+
+                # Write to shadow_ledger (both SHADOW intercepts and EV bypasses)
+                db.record_shadow_event(
+                    shadow_id=str(_uuid.uuid4()),
+                    payment_id=payment_id,
+                    ev_rupees=float(ev_result.ev_rupees),
+                    p_recovery=score,
+                    recoverable_amt=float(ev_result.recoverable_amt),
+                    total_cost=float(ev_result.total_cost),
+                    discount_pct=float(ev_result.discount_pct),
+                    ev_decision=ev_result.decision.value,
+                    ev_reason=ev_result.reason,
+                    proposed_action=decision.action.value,
+                    proposed_status=decision.new_status.value,
+                    execution_mode=get_execution_mode().value,
+                    merchant_id="default",
+                    ab_arm=ab_arm,
+                )
+                db.append_audit_log(
+                    payment_id, "EV_BYPASS",
+                    ev_result.reason,
+                    AuditSource.SYSTEM.value, score,
+                )
+                logger.info(
+                    "Txn %s EV BYPASS: ev=₹%.2f reason=%s",
+                    payment_id, float(ev_result.ev_rupees), ev_result.reason[:80],
+                )
+                disp_span.set_attribute("final_status", bypass_status.value)
+
+            else:
+                # EV positive — proceed with full dispatch
+                final_status = decision.new_status
+                if decision.new_status == TransactionStatus.ACTION_TRIGGERED:
+                    recovery_succeeded = random.random() < (0.30 + score * 0.45)
+                    final_status = (
+                        TransactionStatus.RECOVERED if recovery_succeeded
+                        else TransactionStatus.RECOVERING
+                    )
+                disp_span.set_attribute("final_status", final_status.value)
+                disp_span.set_attribute("recovered",
+                                        final_status == TransactionStatus.RECOVERED)
+
+                db.update_transaction(
+                    payment_id, final_status.value,
+                    failure_category=category.value,
+                    recoverability_score=score,
+                )
+                db.increment_attempts(payment_id)
+                db.record_ab_outcome(
+                    arm=ab_arm,
+                    recovered=(final_status == TransactionStatus.RECOVERED),
+                    amount_paise=amount_paise,
+                )
+
+                if final_status in (TransactionStatus.ACTION_TRIGGERED,
+                                     TransactionStatus.RECOVERING):
+                    await _create_and_dispatch_link(
+                        payment_id, amount_paise, email_redacted, failure_reason
+                    )
 
         # ── Node 9: Cryptographic Audit Log ───────────────────────────────────
         with _tracer.start_as_current_span("node.audit_log"):

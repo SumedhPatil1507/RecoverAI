@@ -219,6 +219,31 @@ CREATE TABLE IF NOT EXISTS ab_experiment (
 
 INSERT OR IGNORE INTO ab_experiment(arm, updated_at) VALUES ('control', datetime('now'));
 INSERT OR IGNORE INTO ab_experiment(arm, updated_at) VALUES ('variant', datetime('now'));
+
+CREATE TABLE IF NOT EXISTS shadow_ledger (
+    shadow_id          TEXT PRIMARY KEY,
+    payment_id         TEXT NOT NULL,
+    merchant_id        TEXT NOT NULL DEFAULT 'default',
+    ab_arm             TEXT NOT NULL DEFAULT '',
+    -- EV snapshot at time of intercept
+    ev_rupees          REAL NOT NULL,
+    p_recovery         REAL NOT NULL,
+    recoverable_amt    REAL NOT NULL,
+    total_cost         REAL NOT NULL,
+    discount_pct       REAL NOT NULL DEFAULT 0.0,
+    ev_decision        TEXT NOT NULL,           -- PROCEED or BYPASS
+    ev_reason          TEXT NOT NULL DEFAULT '',
+    -- Pipeline decision that would have been dispatched
+    proposed_action    TEXT NOT NULL DEFAULT '',
+    proposed_status    TEXT NOT NULL DEFAULT '',
+    -- Execution context
+    execution_mode     TEXT NOT NULL DEFAULT 'SHADOW',   -- SHADOW or LIVE
+    created_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_payment ON shadow_ledger(payment_id);
+CREATE INDEX IF NOT EXISTS idx_shadow_created ON shadow_ledger(created_at);
+CREATE INDEX IF NOT EXISTS idx_shadow_mode    ON shadow_ledger(execution_mode);
 """
 
 # Split DDL into individual statements for safe execution
@@ -802,6 +827,91 @@ def get_ab_results() -> dict[str, dict]:
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM ab_experiment").fetchall()
     return {r["arm"]: dict(r) for r in rows}
+
+
+# ── Shadow Ledger CRUD ────────────────────────────────────────────────────────
+
+def record_shadow_event(
+    shadow_id:      str,
+    payment_id:     str,
+    ev_rupees:      float,
+    p_recovery:     float,
+    recoverable_amt: float,
+    total_cost:     float,
+    discount_pct:   float,
+    ev_decision:    str,
+    ev_reason:      str,
+    proposed_action: str,
+    proposed_status: str,
+    execution_mode:  str,
+    merchant_id:    str = "default",
+    ab_arm:         str = "",
+) -> None:
+    """
+    Write one shadow-mode or EV-bypass intercept record.
+
+    Called by the agent pipeline whenever:
+      • EXECUTION_MODE = "SHADOW"  → all actions intercepted regardless of EV
+      • EV ≤ 0  → action bypassed even in LIVE mode
+
+    These records are stored separately from the main audit_logs so they can
+    be analysed as counterfactuals without polluting the immutable audit chain.
+    """
+    now = _utcnow()
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO shadow_ledger (
+                shadow_id, payment_id, merchant_id, ab_arm,
+                ev_rupees, p_recovery, recoverable_amt, total_cost,
+                discount_pct, ev_decision, ev_reason,
+                proposed_action, proposed_status,
+                execution_mode, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                shadow_id, payment_id, merchant_id, ab_arm,
+                ev_rupees, p_recovery, recoverable_amt, total_cost,
+                discount_pct, ev_decision, ev_reason,
+                proposed_action, proposed_status,
+                execution_mode, now,
+            ),
+        )
+
+
+def get_shadow_events(
+    payment_id: str | None = None,
+    limit: int = 200,
+) -> list[sqlite3.Row]:
+    """Return shadow ledger entries, optionally filtered by payment_id."""
+    with get_db() as conn:
+        if payment_id:
+            return conn.execute(
+                "SELECT * FROM shadow_ledger WHERE payment_id=? ORDER BY created_at DESC LIMIT ?",
+                (payment_id, limit),
+            ).fetchall()
+        return conn.execute(
+            "SELECT * FROM shadow_ledger ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+
+def get_shadow_summary() -> dict[str, Any]:
+    """Aggregate shadow ledger stats for the dashboard EV analysis panel."""
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*)                                            AS total_events,
+                SUM(CASE WHEN ev_decision='BYPASS' THEN 1 ELSE 0 END) AS bypassed,
+                SUM(CASE WHEN ev_decision='PROCEED' THEN 1 ELSE 0 END) AS would_proceed,
+                AVG(ev_rupees)                                      AS avg_ev,
+                SUM(recoverable_amt)                               AS total_recoverable,
+                COUNT(DISTINCT payment_id)                          AS unique_transactions
+            FROM shadow_ledger
+            """
+        ).fetchone()
+    return dict(row) if row else {}
 
 
 # Initialize on import so lightweight API/module consumers and Streamlit have a

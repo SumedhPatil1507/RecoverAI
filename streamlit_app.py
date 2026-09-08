@@ -274,7 +274,7 @@ for _k, _v in {
 # ══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📊 Intelligence Hub",
     "🔗 Payment Links",
     "📨 Dispatch",
@@ -282,6 +282,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🧪 A/B Testing",
     "💥 Chaos Simulator",
     "🏢 Merchants",
+    "💡 EV Engine",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1152,3 +1153,229 @@ with tab7:
                                else "200 req/min" if v["plan"] == "Growth" else "50 req/min"}
                 for mid, v in merchants.items()
             ]), use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 8 — EV ENGINE & SHADOW MODE
+# ══════════════════════════════════════════════════════════════════════════════
+with tab8:
+    import math as _math
+
+    st.markdown("## 💡 Expected Value Engine & Shadow Mode")
+    st.caption(
+        "Every recovery action is gated by an Expected Value calculation. "
+        "Actions where EV ≤ 0 are bypassed and logged to the Shadow Ledger."
+    )
+
+    # ── EV formula explainer ──────────────────────────────────────────────────
+    st.markdown("### Formula")
+    st.latex(r"EV = (P_{recovery} \times Recoverable\_Amount) - (Operational\_Fee + Gateway\_Cost)")
+    st.markdown(
+        "Where **Recoverable Amount** = Transaction Amount × (1 - Discount %)  \n"
+        "**Operational Fee** = ₹2.50 fixed per attempt  \n"
+        "**Gateway Cost** = 1.5% of recoverable amount  \n"
+        "**Decision**: EV > 0 → PROCEED, EV ≤ 0 → BYPASS (no dispatch)"
+    )
+
+    st.divider()
+
+    # ── Live EV Calculator ────────────────────────────────────────────────────
+    st.markdown("### Live EV Calculator")
+    col_ev1, col_ev2, col_ev3 = st.columns(3)
+    with col_ev1:
+        ev_amount   = st.number_input("Transaction Amount (₹)", min_value=1, value=2500, step=100)
+        ev_p        = st.slider("ML Recoverability Score (P)", 0.0, 1.0, 0.65, 0.01)
+    with col_ev2:
+        ev_discount = st.slider("Discount Offered (%)", 0.0, 15.0, 3.0, 0.5)
+        ev_op_fee   = st.number_input("Operational Fee (₹)", min_value=0.0, value=2.50, step=0.50)
+    with col_ev3:
+        ev_gw_pct   = st.slider("Gateway Cost (%)", 0.0, 5.0, 1.5, 0.1)
+        ev_threshold= st.number_input("EV Threshold (₹)", min_value=0.0, value=0.0, step=0.50)
+        ev_mode     = st.radio("Execution Mode", ["LIVE", "SHADOW"], horizontal=True)
+
+    # EV arithmetic (mirrors EVEngine.calculate exactly)
+    _rec_amt  = ev_amount * (1 - ev_discount / 100)
+    _gw_cost  = _rec_amt * ev_gw_pct / 100
+    _total_cost = ev_op_fee + _gw_cost
+    _ev       = ev_p * _rec_amt - _total_cost
+    _shadow   = ev_mode == "SHADOW"
+    _proceed  = _ev > ev_threshold and not _shadow
+
+    # KPI tiles
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Recoverable (₹)",  f"₹{_rec_amt:,.2f}")
+    k2.metric("Gateway Cost (₹)", f"₹{_gw_cost:,.2f}")
+    k3.metric("Total Cost (₹)",   f"₹{_total_cost:,.2f}")
+    k4.metric("Expected Value (₹)", f"₹{_ev:,.2f}",
+              delta="positive" if _ev > 0 else "negative")
+    decision_label = "✅ PROCEED" if _proceed else ("🔵 SHADOW INTERCEPT" if _shadow else "❌ BYPASS")
+    decision_color = C["green"] if _proceed else C["blue"] if _shadow else C["red"]
+    k5.markdown(
+        f'<div style="background:{decision_color}22;border:1px solid {decision_color};'
+        f'border-radius:8px;padding:12px;text-align:center;margin-top:8px">'
+        f'<b style="color:{decision_color};font-size:1.1rem">{decision_label}</b></div>',
+        unsafe_allow_html=True,
+    )
+
+    if _proceed:
+        st.success(f"EV = ₹{_ev:.2f} > threshold ₹{ev_threshold:.2f} — action will be dispatched.")
+    elif _shadow:
+        st.info(f"SHADOW MODE active — EV = ₹{_ev:.2f}. Dispatch suppressed; counterfactual logged to shadow ledger.")
+    else:
+        st.warning(
+            f"EV = ₹{_ev:.2f} ≤ threshold ₹{ev_threshold:.2f} — "
+            f"action bypassed. Saves ₹{_total_cost:.2f} in dispatch costs."
+        )
+
+    st.divider()
+
+    # ── EV sensitivity heat-map: P vs Discount ───────────────────────────────
+    st.markdown("### EV Sensitivity — ML Score vs Discount")
+    import numpy as _np
+
+    _p_vals  = _np.linspace(0.0, 1.0, 21)
+    _d_vals  = _np.linspace(0.0, 15.0, 16)
+    _z       = _np.zeros((len(_p_vals), len(_d_vals)))
+    for pi, p in enumerate(_p_vals):
+        for di, d in enumerate(_d_vals):
+            ra      = ev_amount * (1 - d / 100)
+            gc      = ra * ev_gw_pct / 100
+            _z[pi, di] = p * ra - (ev_op_fee + gc)
+
+    fig_hm = go.Figure(go.Heatmap(
+        z=_z, x=[f"{d:.0f}%" for d in _d_vals], y=[f"{p:.2f}" for p in _p_vals],
+        colorscale="RdYlGn",
+        zmid=0,
+        colorbar=dict(title="EV (₹)"),
+        hovertemplate="P=%{y}  Disc=%{x}  EV=₹%{z:.2f}<extra></extra>",
+    ))
+    fig_hm.add_shape(
+        type="line", x0=-0.5, x1=len(_d_vals) - 0.5,
+        y0=ev_p, y1=ev_p,
+        line=dict(color=C["blue"], width=2, dash="dot"),
+    )
+    fig_hm.update_layout(
+        **_PL, height=340,
+        xaxis_title="Discount %",
+        yaxis_title="ML Recovery Score (P)",
+        title=f"EV Heat-map for ₹{ev_amount:,} transaction (green = positive EV)",
+    )
+    st.plotly_chart(fig_hm, use_container_width=True)
+
+    st.divider()
+
+    # ── EV breakeven chart ────────────────────────────────────────────────────
+    st.markdown("### Breakeven: Minimum P for PROCEED at Each Discount")
+    _d_range = list(range(0, 16))
+    _breakeven = []
+    for d in _d_range:
+        ra = ev_amount * (1 - d / 100)
+        gc = ra * ev_gw_pct / 100
+        cost = ev_op_fee + gc
+        p_break = cost / ra if ra > 0 else 1.0
+        _breakeven.append(min(p_break, 1.0))
+
+    fig_be = go.Figure()
+    fig_be.add_trace(go.Scatter(
+        x=_d_range, y=_breakeven, mode="lines+markers",
+        name="Breakeven P",
+        line=dict(color=C["orange"], width=2.5),
+        fill="tozeroy", fillcolor="rgba(251,188,4,0.12)",
+        hovertemplate="Discount %{x}% → min P = %{y:.3f}<extra></extra>",
+    ))
+    fig_be.add_hline(y=ev_p, line_dash="dash", line_color=C["blue"],
+                     annotation_text=f"Current P={ev_p:.2f}")
+    fig_be.update_layout(
+        **_PL, height=260,
+        xaxis=dict(title="Discount (%)", gridcolor=C["border"]),
+        yaxis=dict(title="Minimum P to PROCEED", gridcolor=C["border"],
+                   range=[0, 1.05]),
+    )
+    st.plotly_chart(fig_be, use_container_width=True)
+
+    st.divider()
+
+    # ── Shadow Ledger live feed ───────────────────────────────────────────────
+    st.markdown("### Shadow Ledger — Bypass Event Log")
+    st.caption("All EV-bypass and SHADOW-mode intercept events are recorded here for counterfactual analysis.")
+
+    @st.cache_data(ttl=30)
+    def _load_shadow_events():
+        try:
+            rows = _db.get_shadow_events(limit=200)
+            return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+    @st.cache_data(ttl=30)
+    def _load_shadow_summary():
+        try:
+            return _db.get_shadow_summary()
+        except Exception:
+            return {}
+
+    shadow_df  = _load_shadow_events()
+    shadow_sum = _load_shadow_summary()
+
+    if shadow_sum:
+        sm1, sm2, sm3, sm4 = st.columns(4)
+        sm1.metric("Total Bypass Events",  int(shadow_sum.get("total_events") or 0))
+        sm2.metric("Bypassed",             int(shadow_sum.get("bypassed") or 0))
+        sm3.metric("Would Proceed (EV>0)", int(shadow_sum.get("would_proceed") or 0))
+        avg_ev = shadow_sum.get("avg_ev") or 0
+        sm4.metric("Avg EV (₹)",           f"₹{float(avg_ev):,.2f}")
+
+    if not shadow_df.empty:
+        disp_cols = [c for c in ["created_at", "payment_id", "ev_rupees",
+                                  "p_recovery", "recoverable_amt", "total_cost",
+                                  "ev_decision", "proposed_action", "execution_mode"]
+                     if c in shadow_df.columns]
+        st.dataframe(shadow_df[disp_cols].head(100), use_container_width=True, height=340)
+
+        # Decision breakdown pie
+        if "ev_decision" in shadow_df.columns:
+            cnt = shadow_df["ev_decision"].value_counts()
+            fig_pie = go.Figure(go.Pie(
+                labels=cnt.index.tolist(), values=cnt.values.tolist(),
+                hole=0.5, marker=dict(colors=[C["red"], C["green"]]),
+                textinfo="label+percent",
+            ))
+            fig_pie.update_layout(**_PL, height=260,
+                                  annotations=[dict(text="Decisions", x=0.5, y=0.5,
+                                                    showarrow=False, font=dict(size=13, color="#fff"))])
+            st.plotly_chart(fig_pie, use_container_width=True)
+    else:
+        st.info(
+            "No shadow events yet. Shadow events are written when:\n"
+            "- **EXECUTION_MODE=SHADOW** intercepts all dispatches\n"
+            "- **EV ≤ 0** bypasses a dispatch in LIVE mode\n\n"
+            "Click **🌱 Seed Demo Data** to populate the dashboard.",
+            icon="💡",
+        )
+
+    # ── JWT / RBAC explainer ──────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### JWT Role-Based Access Control")
+    st.caption("Three roles scope API access. Token issued via POST /auth/token.")
+    rbac_data = [
+        {"Role": "🔑 Admin",    "Scope": "All endpoints",
+         "Token": "`role=admin`",    "Use case": "Engineering, Platform owners"},
+        {"Role": "👤 Operator", "Scope": "HITL queue + read",
+         "Token": "`role=operator`", "Use case": "Recovery agents, Ops team"},
+        {"Role": "📋 Auditor",  "Scope": "Read-only (audit, stats)",
+         "Token": "`role=auditor`",  "Use case": "Compliance, Finance teams"},
+    ]
+    st.dataframe(pd.DataFrame(rbac_data), use_container_width=True, hide_index=True)
+
+    with st.expander("🔍 Token Inspector"):
+        raw_token = st.text_input("Paste a JWT to decode", placeholder="eyJhbGc...")
+        if raw_token:
+            try:
+                sys.path.insert(0, _PKG)
+                from auth import decode_token
+                payload = decode_token(raw_token.strip())
+                import datetime as _dtt
+                exp_str = _dtt.datetime.utcfromtimestamp(payload["exp"]).strftime("%Y-%m-%d %H:%M UTC")
+                st.success(f"Valid token — merchant: `{payload['sub']}` role: `{payload['role']}` expires: {exp_str}")
+                st.json(payload)
+            except Exception as exc:
+                st.error(f"Invalid token: {exc}")

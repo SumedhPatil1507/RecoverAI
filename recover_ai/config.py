@@ -91,6 +91,39 @@ if _PYDANTIC_V2:
         # ── Dashboard ─────────────────────────────────────────────────────────
         dashboard_refresh_seconds: int = 60
 
+        # ── Execution mode ────────────────────────────────────────────────────
+        # LIVE   = full dispatch (payment links + notifications sent)
+        # SHADOW = all scoring + decisions run, but dispatch intercepted;
+        #          counterfactual predictions logged to shadow_ledger table
+        execution_mode: str = Field(
+            default="LIVE",
+            description="LIVE or SHADOW — controls whether final dispatch fires",
+        )
+
+        # ── EV Engine ─────────────────────────────────────────────────────────
+        ev_minimum_rupees:    float = 0.0    # Skip actions with EV ≤ this
+        ev_operational_fee:   float = 2.50   # Fixed cost per recovery attempt (₹)
+        ev_gateway_cost_pct:  float = 1.5    # Variable gateway cost (% of amount)
+
+        # ── JWT / RBAC ────────────────────────────────────────────────────────
+        # 32-byte hex string — generate: python -c "import secrets; print(secrets.token_hex(32))"
+        jwt_secret_key: str = Field(
+            default="dev-jwt-secret-replace-in-production-00000000000000000000000000000000",
+            description="JWT HMAC-SHA256 signing key (keep secret)",
+        )
+        jwt_algorithm:    str   = "HS256"
+        jwt_expire_hours: int   = 8     # token lifetime
+
+        # ── PostgreSQL (optional — falls back to SQLite when blank) ───────────
+        # Set DATABASE_URL to a postgres:// or postgresql+asyncpg:// DSN to
+        # enable the async PG backend.  Leave blank for SQLite (Streamlit Cloud).
+        database_url: str = Field(
+            default="",
+            description="PostgreSQL DSN — blank → SQLite fallback",
+        )
+        pg_pool_min_size: int = 5
+        pg_pool_max_size: int = 20
+
         @field_validator("environment", mode="before")
         @classmethod
         def lowercase_env(cls, v: str) -> str:
@@ -124,6 +157,16 @@ else:
         min_transaction_amount_paise: int = 50_000
         max_transaction_amount_paise: int = 1_500_000
         dashboard_refresh_seconds: int = 60
+        execution_mode: str = "LIVE"
+        ev_minimum_rupees:   float = 0.0
+        ev_operational_fee:  float = 2.50
+        ev_gateway_cost_pct: float = 1.5
+        jwt_secret_key: str = "dev-jwt-secret-replace-in-production-00000000000000000000000000000000"
+        jwt_algorithm:    str = "HS256"
+        jwt_expire_hours: int = 8
+        database_url: str = ""
+        pg_pool_min_size: int = 5
+        pg_pool_max_size: int = 20
 
         @field_validator("environment", pre=True)
         @classmethod

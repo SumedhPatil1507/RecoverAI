@@ -27,6 +27,7 @@ class TransactionStatus(str, Enum):
     RECOVERED         = "RECOVERED"
     EXPIRED           = "EXPIRED"
     REJECTED          = "REJECTED"           # HITL: merchant rejected the action
+    EV_BYPASSED       = "EV_BYPASSED"        # EV ≤ 0 or SHADOW intercept
 
 
 class FailureCategory(str, Enum):

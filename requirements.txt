@@ -49,13 +49,14 @@ scipy>=1.11.0
 tenacity>=8.0.0
 
 # ── Security ──────────────────────────────────────────────────────────────────
-# cryptography: future Vault / JWT integration; safe to keep floor-pinned
+# cryptography: AES-256-GCM column encryption + HKDF key derivation
 cryptography>=42.0.0
-
-# ── Dev / CI tooling (install with: pip install -r requirements.txt -r requirements-dev.txt) ──
-# Kept separate so production images stay lean.
-# See requirements-dev.txt
+# PyJWT: JWT signing / verification for RBAC middleware
+PyJWT>=2.8.0
 
 # Optional distributed task queue (enable with USE_CELERY=1)
 celery>=5.4.0
 redis>=5.0.0
+
+# Optional PostgreSQL async backend (enable with DATABASE_URL=postgresql+asyncpg://...)
+asyncpg>=0.29.0
