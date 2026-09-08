@@ -37,6 +37,17 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+# Streamlit Cloud may retain older app secrets such as ENVIRONMENT=production.
+# The dashboard is intentionally a staging/shadow application: it uses the
+# ephemeral demo store and must never require the API's managed PostgreSQL or
+# distributed queue contract. Set these before config.py imports Streamlit
+# secrets so stale values cannot make the dashboard fail validation.
+os.environ["ENVIRONMENT"] = "staging"
+os.environ["EXECUTION_MODE"] = "SHADOW"
+os.environ["DATABASE_PATH"] = "/tmp/recover_ai_enterprise.db"
+os.environ["USE_CELERY"] = "0"
+os.environ.pop("DATABASE_URL", None)
+
 # ── Page config — first Streamlit call ───────────────────────────────────────
 st.set_page_config(
     page_title="RecoverAI Enterprise",
@@ -53,7 +64,13 @@ def _bootstrap():
     db.init_db()
     return get_settings(), db
 
-_settings, _db = _bootstrap()
+try:
+    _settings, _db = _bootstrap()
+except Exception as exc:
+    st.error("RecoverAI dashboard could not initialise its local demo store.")
+    st.info("Refresh the app after deploying the latest version. The dashboard uses staging, shadow mode, and /tmp/recover_ai_enterprise.db.")
+    st.caption(f"Configuration detail: {type(exc).__name__}")
+    st.stop()
 
 
 # ── Demo data seeder ──────────────────────────────────────────────────────────
@@ -196,10 +213,11 @@ with st.sidebar:
         st.rerun()
     st.divider()
     st.caption(f"**DB:** `{_settings.database_path}`")
+    st.caption(f"**Execution:** `{_settings.execution_mode}`")
     st.caption(f"**ML threshold:** {_settings.ml_low_priority_threshold}")
     st.caption(f"**Max discount:** {_settings.max_discount_pct}%")
     st.divider()
-    st.caption("**Stack:** SQLite WAL · LightGBM · SHA-256 · Streamlit · Plotly")
+    st.caption("**Stack:** SQLite demo store · LightGBM · SHA-256 · Shadow mode · Plotly")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _kpi(col, label, value, sub, colour="#ffffff"):

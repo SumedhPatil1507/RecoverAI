@@ -265,6 +265,11 @@ def init_db() -> None:
     sqlite3.OperationalError on Python 3.14's stricter SQLite bindings when
     called inside an existing transaction context.
     """
+    if settings.is_production:
+        raise RuntimeError(
+            "SQLite persistence is disabled in production. Run the PostgreSQL "
+            "migration and inject the managed database adapter before startup."
+        )
     db_path = _resolve_db_path()
     # Use a fresh direct connection (not the thread-local pool) so we can
     # run DDL outside of the application transaction context manager.
