@@ -245,6 +245,65 @@ require_auditor  = require_role(Role.ADMIN, Role.OPERATOR, Role.AUDITOR)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Principal — richer identity object for non-HTTP contexts
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Principal:
+    """
+    Immutable identity object for use outside the FastAPI dependency chain.
+
+    Fields
+    ------
+    subject   : unique identifier of the actor (user ID, service account, etc.)
+    tenant_id : merchant / tenant this principal belongs to
+    role      : one of "enterprise_admin", "operator", "auditor"
+               (mirrors Role enum values; kept as plain str for serialisability)
+
+    Usage::
+        principal = Principal(subject="admin-1", tenant_id="tenant-a",
+                              role="enterprise_admin")
+        authorize(principal, "enterprise_admin", "operator")
+    """
+    subject:   str
+    tenant_id: str
+    role:      str
+
+    def is_admin(self) -> bool:
+        return self.role == "enterprise_admin"
+
+    def is_operator(self) -> bool:
+        return self.role in ("enterprise_admin", "operator")
+
+    def is_auditor(self) -> bool:
+        return self.role in ("enterprise_admin", "operator", "auditor")
+
+
+def authorize(principal: Principal, *allowed_roles: str) -> None:
+    """
+    Assert that ``principal`` holds one of the ``allowed_roles``.
+
+    Raises
+    ------
+    PermissionError
+        When the principal's role is not in the allowed set.
+
+    Usage::
+        authorize(principal, "enterprise_admin", "operator")
+        # → raises PermissionError if principal.role == "auditor"
+    """
+    if principal.role not in allowed_roles:
+        raise PermissionError(
+            f"Principal '{principal.subject}' with role '{principal.role}' "
+            f"is not authorised for this action. "
+            f"Required roles: {list(allowed_roles)}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # /auth/token endpoint  (registered in main.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 

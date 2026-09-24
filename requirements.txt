@@ -60,3 +60,6 @@ redis>=5.0.0
 
 # Optional PostgreSQL async backend (enable with DATABASE_URL=postgresql+asyncpg://...)
 asyncpg>=0.29.0
+
+# Optional Kafka/Redpanda streaming (enable with KAFKA_BOOTSTRAP_SERVERS=...)
+aiokafka>=0.11.0

@@ -50,7 +50,8 @@ for _p in (_PKG, _ROOT):
         sys.path.insert(0, _p)
 
 # ── Shared test secret ────────────────────────────────────────────────────────
-_TEST_SECRET = "test-hmac-secret-32bytes-exactly!!"
+_TEST_SECRET   = "test-hmac-secret-32bytes-exactly!!"
+_MODULE_SECRET = _TEST_SECRET   # alias for conftest.pytest_runtest_setup
 os.environ.setdefault("RAZORPAY_WEBHOOK_SECRET", _TEST_SECRET)
 os.environ.setdefault("AUDIT_HMAC_KEY",          _TEST_SECRET)
 os.environ.setdefault("COLUMN_ENCRYPTION_KEY",   "a" * 64)   # 64 hex chars = 32 bytes

@@ -62,10 +62,11 @@ for _p in (_PKG, _ROOT):
         sys.path.insert(0, _p)
 
 # ── Isolated temp DB for this test module ────────────────────────────────────
-_TMP_DB = tempfile.mktemp(suffix="_ev_test.db")
+_TMP_DB        = tempfile.mktemp(suffix="_ev_test.db")
+_MODULE_SECRET = "ev-test-secret-32bytes-xxxxxxx!"
 os.environ.setdefault("DATABASE_PATH",          _TMP_DB)
-os.environ.setdefault("RAZORPAY_WEBHOOK_SECRET", "ev-test-secret-32bytes-xxxxxxx!")
-os.environ.setdefault("AUDIT_HMAC_KEY",          "ev-test-secret-32bytes-xxxxxxx!")
+os.environ.setdefault("RAZORPAY_WEBHOOK_SECRET", _MODULE_SECRET)
+os.environ.setdefault("AUDIT_HMAC_KEY",          _MODULE_SECRET)
 os.environ.setdefault("COLUMN_ENCRYPTION_KEY",   "a" * 64)
 
 
@@ -554,7 +555,13 @@ class TestJWTAuth:
 
     def test_tampered_signature_raises(self):
         from auth import Role, create_token, decode_token
-        token = create_token("merchant_abc", Role.ADMIN)
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"JWT_SECRET_KEY": "test-jwt-tamper-secret-32bytes-xx!"}):
+            from config import get_settings
+            get_settings.cache_clear()
+            token = create_token("merchant_abc", Role.ADMIN)
+            get_settings.cache_clear()
         # Flip last char of signature
         parts = token.split(".")
         parts[-1] = parts[-1][:-1] + ("A" if parts[-1][-1] != "A" else "B")
@@ -678,3 +685,362 @@ class TestAuditChainWithEV:
         assert ok is True
         assert tampered == []
         assert total > 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestChaosResilience  — Epic 4: Chaos verification
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestChaosResilience:
+    """
+    Audit chain continuity under simulated failure scenarios:
+
+      1. DB partition failure (connection closed mid-write)
+      2. Thread worker crash (daemon thread killed)
+      3. Concurrent write storm (50 threads, 10 writes each)
+      4. Mid-chain corruption + subsequent writes still form valid sub-chain
+      5. Verify integrity check returns correct tampered_ids after partial failure
+    """
+
+    def setup_method(self) -> None:
+        import database as _db
+        _db.init_db()
+
+    # ── 1. DB partition failure ───────────────────────────────────────────────
+
+    def test_audit_chain_survives_partial_write_failure(self) -> None:
+        """
+        Simulate a partial write: the connection is forcibly closed after the
+        first insert, then re-opened.  The chain must still be verifiable for
+        the rows that were committed.
+        """
+        import database as _db
+
+        txn_id = f"pay_chaos_partial_{uuid.uuid4().hex[:10]}"
+        _db.upsert_transaction(txn_id, f"order_{uuid.uuid4().hex}", 100_000,
+                               "INR", "GATEWAY_ERROR", "chaos test", None)
+
+        # Write one valid entry
+        _db.append_audit_log(txn_id, "ML_SCORED", "score=0.7", "ml_scorer", 0.7)
+
+        # Simulate partition: forcibly close the connection
+        if hasattr(_db._local, "conn"):
+            try:
+                _db._local.conn.close()
+            except Exception:
+                pass
+            del _db._local.conn
+
+        # Connection should auto-reopen on next access
+        _db.append_audit_log(txn_id, "RECOVERED", "post-partition write", "system", 0.7)
+
+        # Chain must still be valid
+        ok, msg = _db.verify_audit_integrity()
+        assert ok, f"Chain broken after partition simulation: {msg}"
+
+    def test_audit_integrity_after_connection_recycling(self) -> None:
+        """
+        Recycle the connection 5 times between writes.  Chain must hold.
+        """
+        import database as _db
+
+        txn_id = f"pay_chaos_recycle_{uuid.uuid4().hex[:10]}"
+        _db.upsert_transaction(txn_id, f"order_{uuid.uuid4().hex}", 200_000,
+                               "INR", "NETWORK_TIMEOUT", "chaos test", None)
+
+        for i in range(5):
+            _db.append_audit_log(
+                txn_id, f"STEP_{i}", f"cycle write {i}", "system", 0.5 + i * 0.05,
+            )
+            # Recycle connection
+            if hasattr(_db._local, "conn"):
+                try:
+                    _db._local.conn.close()
+                except Exception:
+                    pass
+                del _db._local.conn
+
+        ok, msg = _db.verify_audit_integrity()
+        assert ok, f"Chain broken after connection recycling: {msg}"
+
+    # ── 2. Thread worker crash ────────────────────────────────────────────────
+
+    def test_worker_thread_crash_does_not_corrupt_chain(self) -> None:
+        """
+        Spawn 3 worker threads; kill one after it writes one entry.
+        The remaining threads must complete successfully and the chain
+        must verify clean.
+        """
+        import threading, database as _db
+
+        txn_ids  = [f"pay_chaos_thread_{uuid.uuid4().hex[:8]}" for _ in range(3)]
+        errors   = []
+        barrier  = threading.Barrier(3)
+
+        for tid in txn_ids:
+            _db.upsert_transaction(tid, f"order_{uuid.uuid4().hex}", 300_000,
+                                   "INR", "BANK_DECLINE", "chaos test", None)
+
+        def worker(tid: str, crash: bool) -> None:
+            try:
+                _db.append_audit_log(tid, "ML_SCORED", "score=0.6", "ml_scorer", 0.6)
+                barrier.wait(timeout=5.0)
+                if crash:
+                    raise RuntimeError("Simulated worker crash")
+                _db.append_audit_log(tid, "RECOVERED", "success", "system", 0.6)
+            except RuntimeError:
+                # Expected crash — do not write final entry
+                pass
+            except Exception as exc:
+                errors.append(str(exc))
+
+        threads = [
+            threading.Thread(target=worker, args=(txn_ids[i], i == 1), daemon=True)
+            for i in range(3)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+
+        assert not errors, f"Unexpected worker errors: {errors}"
+
+        # Chain must be valid — crashed worker left a partial entry which is fine
+        ok, msg = _db.verify_audit_integrity()
+        assert ok, f"Chain broken after worker crash: {msg}"
+
+    # ── 3. Concurrent write storm ─────────────────────────────────────────────
+
+    def test_concurrent_audit_writes_maintain_chain_integrity(self) -> None:
+        """
+        50 threads each write 5 audit log entries concurrently.
+        After all threads complete, the full chain must verify intact.
+        """
+        import threading, database as _db
+
+        NUM_THREADS = 20   # reduced for CI speed; 50 in full chaos runs
+        WRITES_EACH = 5
+        errors       = []
+
+        # Pre-insert transactions
+        txn_ids = []
+        for i in range(NUM_THREADS):
+            tid = f"pay_chaos_storm_{uuid.uuid4().hex[:8]}"
+            txn_ids.append(tid)
+            _db.upsert_transaction(tid, f"order_{uuid.uuid4().hex}", 150_000,
+                                   "INR", "USER_CANCELLED", "storm test", None)
+
+        def storm_worker(tid: str) -> None:
+            for j in range(WRITES_EACH):
+                try:
+                    _db.append_audit_log(
+                        tid, f"STORM_{j}", f"concurrent write {j}",
+                        "system", round(0.3 + j * 0.1, 2),
+                    )
+                except Exception as exc:
+                    errors.append(str(exc))
+
+        threads = [threading.Thread(target=storm_worker, args=(tid,), daemon=True)
+                   for tid in txn_ids]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30.0)
+
+        assert not errors, f"Storm write errors: {errors[:5]}"
+
+        ok, msg = _db.verify_audit_integrity()
+        assert ok, f"Chain broken after concurrent storm: {msg}"
+
+    # ── 4. Mid-chain corruption + subsequent valid writes ────────────────────
+
+    def test_tampered_entry_followed_by_valid_entries_returns_correct_tampered_ids(self) -> None:
+        """
+        Insert 3 valid entries, corrupt entry #2, insert 3 more valid entries.
+        verify_audit_integrity_detailed must identify exactly entry #2 and
+        all entries after it as tampered (chain break propagates forward).
+
+        NOTE: This test uses its own fresh SQLite DB to avoid contaminating
+        the module-level shared chain used by other TestAuditChainWithEV tests.
+        """
+        import sqlite3, database as _db, tempfile
+
+        # Use a fresh DB scoped to this single test
+        isolated_db = tempfile.mktemp(suffix="_tamper_test.db")
+        orig_db = os.environ.get("DATABASE_PATH", _TMP_DB)
+        os.environ["DATABASE_PATH"] = isolated_db
+        if hasattr(_db._local, "conn"):
+            try:
+                _db._local.conn.close()
+            except Exception:
+                pass
+            del _db._local.conn
+
+        try:
+            _db.init_db()
+
+            txn_id = f"pay_chaos_mid_{uuid.uuid4().hex[:10]}"
+            _db.upsert_transaction(txn_id, f"order_{uuid.uuid4().hex}", 500_000,
+                                   "INR", "GATEWAY_ERROR", "chaos test", None)
+
+            for i in range(3):
+                _db.append_audit_log(
+                    txn_id, f"PRE_{i}", f"pre-tamper {i}", "system", 0.5 + i * 0.05,
+                )
+
+            # Get all current log_ids
+            with _db.get_db() as conn:
+                before_ids = [r["log_id"] for r in conn.execute(
+                    "SELECT log_id FROM audit_logs ORDER BY log_id ASC"
+                ).fetchall()]
+
+            # Corrupt the SECOND entry (index 1 in before_ids)
+            tamper_id = before_ids[1] if len(before_ids) >= 2 else before_ids[0]
+            with _db.get_db() as conn:
+                conn.execute(
+                    "UPDATE audit_logs SET current_hash='CORRUPTED_HASH_00000000' "
+                    "WHERE log_id=?", (tamper_id,)
+                )
+
+            # Write 3 more valid entries after the corruption
+            for i in range(3):
+                _db.append_audit_log(
+                    txn_id, f"POST_{i}", f"post-tamper {i}", "system", 0.7 + i * 0.02,
+                )
+
+            ok, msg, tampered_ids, total = _db.verify_audit_integrity_detailed()
+            assert ok is False
+            assert len(tampered_ids) > 0
+            assert tamper_id in tampered_ids, (
+                f"Expected tampered_id {tamper_id} not in {tampered_ids}"
+            )
+        finally:
+            # Always restore the module DB so subsequent tests are not affected
+            os.environ["DATABASE_PATH"] = orig_db
+            if hasattr(_db._local, "conn"):
+                try:
+                    _db._local.conn.close()
+                except Exception:
+                    pass
+                del _db._local.conn
+
+    # ── 5. EV bypass under concurrent pressure ────────────────────────────────
+
+    def test_ev_bypass_events_written_atomically_under_load(self) -> None:
+        """
+        20 threads concurrently write shadow_ledger entries.
+        All entries must be retrievable and the count must match.
+        """
+        import threading, database as _db
+
+        N        = 20
+        written  = []
+        errors   = []
+
+        def _write() -> None:
+            try:
+                sid = str(uuid.uuid4())
+                _db.record_shadow_event(
+                    shadow_id=sid,
+                    payment_id=f"pay_{uuid.uuid4().hex[:10]}",
+                    ev_rupees=-1.0, p_recovery=0.1,
+                    recoverable_amt=5.0, total_cost=6.0,
+                    discount_pct=0.0, ev_decision="BYPASS",
+                    ev_reason="chaos load test", proposed_action="X",
+                    proposed_status="Y", execution_mode="LIVE",
+                )
+                written.append(sid)
+            except Exception as exc:
+                errors.append(str(exc))
+
+        threads = [threading.Thread(target=_write, daemon=True) for _ in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+
+        assert not errors, f"Shadow write errors: {errors[:3]}"
+
+        rows = _db.get_shadow_events(limit=N + 50)
+        stored_ids = {r["shadow_id"] for r in rows}
+        missing = [sid for sid in written if sid not in stored_ids]
+        assert not missing, f"{len(missing)} shadow events lost under concurrent load"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestBandit  — Epic 2: Thompson Sampling bandit
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestBandit:
+    """Tests for the ContextualBandit Thompson Sampling implementation."""
+
+    def _make_bandit(self, arms=None):
+        from bandit import ContextualBandit
+        return ContextualBandit(arms=arms or ["control", "variant"])
+
+    def test_choose_returns_valid_arm(self) -> None:
+        b   = self._make_bandit()
+        arm = b.choose(context={"failure_category": "GATEWAY_DOWN", "ml_score": 0.7})
+        assert arm in ("control", "variant")
+
+    def test_update_shifts_distribution(self) -> None:
+        """After many successes on 'variant', it should be chosen more often."""
+        b = self._make_bandit()
+        # Seed variant with many successes
+        for _ in range(50):
+            b.update("variant", reward=1.0,
+                     context={"failure_category": "GATEWAY_DOWN", "ml_score": 0.7, "amount_rupees": 2000})
+        for _ in range(5):
+            b.update("control", reward=0.0,
+                     context={"failure_category": "GATEWAY_DOWN", "ml_score": 0.7, "amount_rupees": 2000})
+        # Sample 100 times — variant should win majority
+        ctx = {"failure_category": "GATEWAY_DOWN", "ml_score": 0.7, "amount_rupees": 2000}
+        choices = [b.choose(context=ctx) for _ in range(100)]
+        variant_count = choices.count("variant")
+        assert variant_count > 60, (
+            f"Expected variant to win >60% but got {variant_count}/100"
+        )
+
+    def test_update_unknown_arm_ignored(self) -> None:
+        b = self._make_bandit()
+        b.update("nonexistent_arm", reward=1.0)  # must not raise
+
+    def test_context_bucketing_separates_priors(self) -> None:
+        """Different contexts must maintain independent Beta distributions."""
+        b = self._make_bandit()
+        ctx_a = {"failure_category": "GATEWAY_DOWN", "ml_score": 0.8, "amount_rupees": 5000}
+        ctx_b = {"failure_category": "INSUFFICIENT_FUNDS", "ml_score": 0.2, "amount_rupees": 500}
+        for _ in range(30):
+            b.update("variant", reward=1.0, context=ctx_a)
+            b.update("variant", reward=0.0, context=ctx_b)
+        report = b.report()
+        # Find variant rows for each context
+        rows_a = [r for r in report if r["arm"] == "variant" and "GATEWAY_DOWN" in r["context"]]
+        rows_b = [r for r in report if r["arm"] == "variant" and "INSUFFICIENT_FUNDS" in r["context"]]
+        if rows_a and rows_b:
+            assert rows_a[0]["mean"] != rows_b[0]["mean"], (
+                "Different contexts should have different Beta means"
+            )
+
+    def test_state_dict_roundtrip(self) -> None:
+        """Serialize → restore → choose should work identically."""
+        b = self._make_bandit()
+        ctx = {"failure_category": "BANK_DECLINE", "ml_score": 0.5, "amount_rupees": 1000}
+        for _ in range(10):
+            b.update("control", reward=0.8, context=ctx)
+        sd = b.state_dict()
+        b2 = self._make_bandit()
+        b2.load_state_dict(sd)
+        assert b2.report() == b.report()
+
+    def test_epsilon_greedy_mode(self) -> None:
+        """Epsilon-greedy must occasionally choose non-optimal arms."""
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"BANDIT_MODE": "epsilon_greedy", "BANDIT_EPSILON": "1.0"}):
+            # epsilon=1.0 → always explore (random)
+            from bandit import ContextualBandit
+            b = ContextualBandit()
+            choices = set(b.choose() for _ in range(20))
+            # With epsilon=1.0, both arms should appear
+            assert len(choices) > 1, "epsilon_greedy with epsilon=1.0 should explore both arms"

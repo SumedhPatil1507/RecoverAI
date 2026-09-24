@@ -126,27 +126,25 @@ def _tenant_keys() -> dict[str, str]:
 
 @app.middleware("http")
 async def _tenant_auth(request: Request, call_next):
-    request.state.principal = None
+    request.state.merchant_id = request.headers.get("X-Merchant-ID", "default")
+    # JWT bearer token (when auth module available)
     bearer = request.headers.get("Authorization", "")
-    if bearer.lower().startswith("bearer "):
+    if bearer.lower().startswith("bearer ") and _AUTH_AVAILABLE:
         try:
-            request.state.principal = decode_bearer_token(
-                bearer[7:].strip(), settings.jwt_secret
-            )
-            request.state.merchant_id = request.state.principal.tenant_id
-        except ValueError:
+            from auth import decode_token
+            payload = decode_token(bearer[7:].strip())
+            request.state.merchant_id = payload.get("sub", "default")
+        except Exception:
             return JSONResponse(status_code=401, content={"detail": "Invalid bearer token"})
+        return await call_next(request)
+    # API-key fallback
     keys = _tenant_keys()
-    if request.state.principal is not None:
-        pass
-    elif keys and request.url.path.startswith("/api/"):
+    if keys and request.url.path.startswith("/api/"):
         supplied = request.headers.get("X-API-Key", "")
         merchant = next((mid for mid, key in keys.items() if hmac.compare_digest(key, supplied)), None)
         if merchant is None:
             return JSONResponse(status_code=401, content={"detail": "Invalid tenant API key"})
         request.state.merchant_id = merchant
-    else:
-        request.state.merchant_id = request.headers.get("X-Merchant-ID", "default")
     return await call_next(request)
 
 
@@ -536,9 +534,6 @@ async def api_hitl_decide(
     body: HITLDecisionRequest,
     request: Request,
 ) -> dict:
-    principal: Principal | None = getattr(request.state, "principal", None)
-    if principal is not None and principal.role not in {"enterprise_admin", "operator"}:
-        raise HTTPException(status_code=403, detail="Auditors cannot decide HITL actions")
     item = db.get_hitl_item(hitl_id)
     if not item:
         raise HTTPException(status_code=404, detail=f"HITL item {hitl_id} not found")

@@ -1,8 +1,25 @@
 from __future__ import annotations
 
+import os
+import sys
+import tempfile
 from decimal import Decimal
 
 import pytest
+
+# ── Isolated DB for this module ───────────────────────────────────────────────
+_MODULE_DB     = tempfile.mktemp(suffix="_controls_test.db")
+_MODULE_SECRET = "controls-test-secret-32bytes-x!"
+os.environ.setdefault("DATABASE_PATH",          _MODULE_DB)
+os.environ.setdefault("RAZORPAY_WEBHOOK_SECRET", _MODULE_SECRET)
+os.environ.setdefault("AUDIT_HMAC_KEY",          _MODULE_SECRET)
+
+# ── Path setup ────────────────────────────────────────────────────────────────
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PKG  = os.path.join(_ROOT, "recover_ai")
+for _p in (_PKG, _ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from recover_ai.expected_value import calculate_expected_value
 from recover_ai.auth import Principal, authorize

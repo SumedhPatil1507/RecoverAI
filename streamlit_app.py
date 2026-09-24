@@ -1397,3 +1397,116 @@ with tab8:
                 st.json(payload)
             except Exception as exc:
                 st.error(f"Invalid token: {exc}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 8 CONTINUATION — Contextual Bandit + Agent Graph
+# ══════════════════════════════════════════════════════════════════════════════
+with tab8:
+    st.divider()
+    st.markdown("### 🎰 Contextual Bandit — Recovery Strategy Arm Performance")
+    st.caption(
+        "Thompson Sampling selects between **control** (rule engine) and "
+        "**variant** (LLM-augmented) based on real-time recovery lift. "
+        "Set `BANDIT_MODE=linucb` or `epsilon_greedy` via env var."
+    )
+
+    @st.cache_data(ttl=30)
+    def _load_bandit_report():
+        try:
+            sys.path.insert(0, _PKG)
+            from bandit import get_bandit
+            return get_bandit().report()
+        except Exception:
+            return []
+
+    bandit_rows = _load_bandit_report()
+    if bandit_rows:
+        b_df = pd.DataFrame(bandit_rows)
+        # Colour rows by arm
+        st.dataframe(b_df, use_container_width=True, hide_index=True)
+
+        # Mean recovery rate bar chart per arm
+        arm_means = b_df.groupby("arm")["mean"].mean().reset_index()
+        fig_b = go.Figure(go.Bar(
+            x=arm_means["arm"], y=arm_means["mean"],
+            marker_color=[C["green"] if a == "variant" else C["blue"]
+                          for a in arm_means["arm"]],
+            text=[f"{v:.3f}" for v in arm_means["mean"]],
+            textposition="outside",
+        ))
+        fig_b.update_layout(
+            **_PL, height=260, showlegend=False,
+            yaxis=dict(title="Mean Recovery Rate", gridcolor=C["border"], range=[0, 1.05]),
+            xaxis=dict(gridcolor=C["border"]),
+            title="Thompson Sampling — Mean Reward per Arm",
+        )
+        st.plotly_chart(fig_b, use_container_width=True)
+    else:
+        st.info(
+            "Bandit data will populate once the agent pipeline has processed "
+            "transactions with `AGENT_GRAPH=1` enabled. "
+            "Click **🌱 Seed Demo Data** to generate test events.",
+            icon="🎰",
+        )
+
+    # ── Agent Graph Configuration ─────────────────────────────────────────────
+    st.divider()
+    st.markdown("### 🔄 Agent Graph — Stateful Pipeline Configuration")
+    st.caption(
+        "The stateful agent graph (INGEST→SCORE→ROOT_CAUSE→EV_GATE→DISPATCH→MONITOR→REFLECT) "
+        "replaces the linear pipeline when `AGENT_GRAPH=1`."
+    )
+
+    col_ag1, col_ag2 = st.columns(2)
+    with col_ag1:
+        st.markdown("#### Graph Settings")
+        agent_graph_on = os.getenv("AGENT_GRAPH", "0") == "1"
+        st.markdown(
+            f"**AGENT_GRAPH:** {'✅ ON' if agent_graph_on else '⚪ OFF (linear pipeline)'}  \n"
+            f"Set `AGENT_GRAPH=1` in Streamlit Secrets to activate the stateful graph."
+        )
+        reflect_cycles = int(os.getenv("MAX_REFLECT_CYCLES", "2"))
+        st.metric("Max REFLECT Cycles", reflect_cycles,
+                  help="Number of fallback-channel retries before accepting partial dispatch.")
+        bandit_mode = os.getenv("BANDIT_MODE", "thompson")
+        st.metric("Bandit Mode", bandit_mode.upper())
+
+    with col_ag2:
+        st.markdown("#### Node Transition Diagram")
+        mermaid_src = """
+```
+flowchart TD
+    A([INGEST]) --> B([SCORE])
+    B --> C([ROOT_CAUSE])
+    C --> D{HITL Gate}
+    D -->|"amount > ₹50k"| E([PENDING_APPROVAL])
+    D -->|pass| F([EV_GATE])
+    F -->|"EV ≤ 0"| G([EV_BYPASSED])
+    F -->|"EV > 0"| H([DISPATCH])
+    H --> I([MONITOR])
+    I -->|success| J([AUDIT_LOG])
+    I -->|"fail (≤ N cycles)"| K([REFLECT])
+    K -->|"adjusted channel + fee"| F
+    J --> L([TERMINAL])
+```
+"""
+        st.markdown(mermaid_src)
+
+    # ── Kafka Streaming Status ────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### ⚡ Kafka / Redpanda Streaming Status")
+    kafka_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "")
+    if kafka_servers:
+        st.success(f"Kafka active: `{kafka_servers}`  \nTopic: `recoverai.payment.failed`")
+        st.markdown(
+            f"- **Consumer group:** `{os.getenv('KAFKA_GROUP_ID', 'recoverai-consumer-group')}`  \n"
+            f"- **DLQ topic:** `{os.getenv('KAFKA_TOPIC_DLQ', 'recoverai.dlq')}`  \n"
+            f"- **Semantics:** at-least-once with manual offset commit"
+        )
+    else:
+        st.info(
+            "Kafka not configured — using asyncio.Queue fallback.  \n"
+            "Set `KAFKA_BOOTSTRAP_SERVERS=broker:9092` in Streamlit Secrets "
+            "or `.env` to enable Redpanda/Kafka streaming.",
+            icon="⚡",
+        )

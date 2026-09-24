@@ -3,11 +3,11 @@
 > **Agentic Payment Recovery Platform** — Razorpay AI Buildathon · Track 03
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://recoverai-enterprise.streamlit.app)
-[![Tests](https://img.shields.io/badge/tests-100%20passed-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-132%20passed-brightgreen.svg)](#testing)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-RecoverAI autonomously recovers failed Razorpay payments using a multi-agent pipeline with enterprise-grade financial controls: LightGBM ML scoring → KS drift detection → LLM root-cause classification → **Expected Value gate** → A/B-tested recovery strategies → Razorpay Payment Links → WhatsApp/SMS dispatch → HITL approval queue → SHA-256 + HMAC cryptographic audit ledger.
+RecoverAI autonomously recovers failed Razorpay payments using a **stateful multi-agent graph** with Thompson Sampling bandit routing, LightGBM ML scoring, KS drift detection, EV-gated dispatch, HITL approval workflows, cryptographic audit ledger, and Kafka/Redpanda streaming.
 
 ---
 
@@ -17,43 +17,75 @@ RecoverAI autonomously recovers failed Razorpay payments using a multi-agent pip
 |-----|-------------|
 | 📊 **Intelligence Hub** | Live KPIs, ML funnel, time-series, SHA-256+HMAC audit ledger |
 | 🔗 **Payment Links** | Razorpay Payment Links API with circuit breaker + smart routing |
-| 📨 **Dispatch** | WhatsApp / Twilio SMS / SMTP with per-channel circuit breakers |
+| 📨 **Dispatch** | WhatsApp/SMS/Email with per-channel circuit breakers |
 | 👤 **HITL Approvals** | Human-in-the-Loop queue + A/B Financial ROI Calculator |
-| 🧪 **A/B Testing** | Live experiment engine with z-score, net revenue lift, margin |
-| 💥 **Chaos Simulator** | 500-concurrent webhook stress test with p95/p99 latency |
+| 🧪 **A/B Testing** | Live experiment engine with z-score and net revenue lift |
+| 💥 **Chaos Simulator** | 500-concurrent webhook stress test |
 | 🏢 **Merchants** | Multi-tenant isolation with per-merchant dashboards |
-| 💡 **EV Engine** | Expected Value calculator, heat-map, shadow ledger, RBAC inspector |
+| 💡 **EV Engine** | EV calculator, heat-map, bandit report, agent graph diagram |
 
 ---
 
-## 🏗 Enterprise Architecture
+## 🏗 Architecture
 
 ```
-Razorpay Webhook  ──HMAC──▶  POST /webhook/razorpay  (202 ACK < 15 ms)
-                                      │
-                              asyncio.Queue / Celery+Redis
-                                      │
-              ┌───────────────────────▼──────────────────────────┐
-              │   agent_engine.py  (9-node OTel-traced pipeline) │
-              │                                                   │
-              │  Ingest → ML Score (KS drift) → A/B Route →      │
-              │  LLM/Rules → Discount Guardrail (15% cap) →       │
-              │  HITL Gate (> ₹50k / ambiguous) →                │
-              │  ┌─────────────────────────────┐                 │
-              │  │  EV Gate (NEW)              │                 │
-              │  │  EV = P×R − (OpFee+GwCost)  │                 │
-              │  │  EV ≤ 0  → Shadow Ledger    │                 │
-              │  │  EV > 0  → Razorpay Link +  │                 │
-              │  │           WhatsApp/SMS       │                 │
-              │  └─────────────────────────────┘                 │
-              │  SHA-256 + HMAC Audit Log                        │
-              └──────────────────────────────────────────────────┘
-                                      │
-              ┌───────────────────────▼──────────────────────────┐
-              │  SQLite (local) / PostgreSQL Aurora (production)  │
-              │  Row-Level Security · Monthly range partitions    │
-              └──────────────────────────────────────────────────┘
+Webhook (202 ACK < 15ms)
+        │
+   ┌────▼─────────────────────────────────────────┐
+   │  Kafka / asyncio.Queue                       │
+   └────────────────────────┬─────────────────────┘
+                            │
+   ┌────────────────────────▼──────────────────────┐
+   │  agent_graph.py  — Stateful Graph Runner      │
+   │                                               │
+   │  INGEST → SCORE → ROOT_CAUSE                  │
+   │       ↓                                       │
+   │  Contextual Bandit (Thompson Sampling)        │
+   │       ↓                                       │
+   │  EV_GATE  (EV = P×R − Costs)                  │
+   │   ├─ BYPASS → shadow_ledger + audit_log       │
+   │   └─ PROCEED → DISPATCH                       │
+   │                    │                          │
+   │               MONITOR                         │
+   │               ├─ ok → AUDIT_LOG               │
+   │               └─ fail → REFLECT (≤2 cycles)   │
+   │                    │                          │
+   │             (fallback channel)                │
+   │               → EV_GATE retry                 │
+   └───────────────────────────────────────────────┘
+                            │
+   ┌────────────────────────▼──────────────────────┐
+   │  SQLite (dev) / PostgreSQL Aurora (prod)      │
+   │  SHA-256 hash-chain + HMAC-per-row ledger     │
+   └───────────────────────────────────────────────┘
 ```
+
+---
+
+## 🆕 Epic Changes (latest)
+
+### Epic 1 — LangGraph Stateful Agent
+- **`recover_ai/agent_graph.py`** — Full stateful graph: INGEST→SCORE→ROOT_CAUSE→EV_GATE→DISPATCH→MONITOR→REFLECT
+- REFLECT self-healing: on dispatch failure → select fallback channel (WA→SMS→Email) → re-evaluate EV → retry
+- OTel spans on every node with `token_count`, `latency_ms`, `prompt_version` attributes
+- Enable with `AGENT_GRAPH=1`; falls back to linear pipeline without it
+
+### Epic 2 — Contextual Bandit
+- **`recover_ai/bandit.py`** — Thompson Sampling Beta(α,β) per (arm, context_bucket)
+- Context = failure_category × ml_score_band × amount_band → isolated priors per bucket
+- Modes: `BANDIT_MODE=thompson` (default) | `linucb` | `epsilon_greedy`
+- **`tests/test_llm_eval.py`** — 14 LLM eval tests: faithfulness, tone compliance, zero hallucination, discount guardrail, confidence calibration
+
+### Epic 3 — Kafka Streaming
+- **`recover_ai/kafka_worker.py`** — async aiokafka producer/consumer, at-least-once semantics
+- Manual offset commit after successful processing; DLQ topic for exhausted retries
+- Falls back to asyncio.Queue when `KAFKA_BOOTSTRAP_SERVERS` is not set
+- Enable with `KAFKA_BOOTSTRAP_SERVERS=broker:9092`
+
+### Epic 4 — Chaos Tests + OTel
+- **`tests/test_ev_engine.py`** — 13 new chaos tests: DB partition failure, thread crashes, concurrent write storms, mid-chain corruption
+- **`tests/test_enterprise_controls.py`** — 7 EV unit-economic + RBAC authorization tests
+- `auth.py` — `Principal` dataclass + `authorize()` function added for non-HTTP RBAC
 
 ---
 
@@ -67,14 +99,12 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 streamlit run streamlit_app.py
 ```
 
-Dashboard auto-seeds 60 demo transactions on first load.
-
 ---
 
 ## ☁️ Deploy to Streamlit Cloud
 
 ### Step 1 — Connect
-**[share.streamlit.io](https://share.streamlit.io)** → New app → `SumedhPatil1507/RecoverAI`, branch `main`, main file `streamlit_app.py`
+[share.streamlit.io](https://share.streamlit.io) → New app → `SumedhPatil1507/RecoverAI`, branch `main`, main file `streamlit_app.py`
 
 ### Step 2 — Secrets
 Streamlit Cloud → your app → ⋮ → Settings → Secrets:
@@ -90,17 +120,12 @@ RAZORPAY_WEBHOOK_SECRET = "your_webhook_secret"
 RAZORPAY_KEY_ID         = "rzp_test_xxxxxxxxxxxx"
 RAZORPAY_KEY_SECRET     = "your_key_secret"
 
-# Audit HMAC (generate: python -c "import secrets; print(secrets.token_hex(32))")
+# Security
 AUDIT_HMAC_KEY = "your_64_char_hex_key"
+JWT_SECRET_KEY = "your_64_char_jwt_key"
 
-# JWT RBAC (generate: python -c "import secrets; print(secrets.token_hex(32))")
-JWT_SECRET_KEY = "your_64_char_jwt_signing_key"
-
-# EV Engine tuning (optional — shown with defaults)
-EV_MINIMUM_RUPEES   = "0.0"
-EV_OPERATIONAL_FEE  = "2.50"
-EV_GATEWAY_COST_PCT = "1.5"
-EXECUTION_MODE      = "LIVE"   # change to SHADOW for dry-run mode
+# Optional: OpenAI (leave blank for rule engine only)
+OPENAI_API_KEY = ""
 
 # Optional: Gmail SMTP
 SMTP_HOST = "smtp.gmail.com"
@@ -109,54 +134,21 @@ SMTP_USER = "sumedhp612@gmail.com"
 SMTP_PASS = "your_16_char_app_password"
 SMTP_FROM = "sumedhp612@gmail.com"
 
-# Optional: OpenAI (leave blank for rule engine)
-OPENAI_API_KEY = ""
+# Optional: Agent Graph + Bandit
+AGENT_GRAPH  = "0"         # set to "1" to enable stateful graph
+BANDIT_MODE  = "thompson"  # or "linucb" or "epsilon_greedy"
+
+# Optional: Kafka/Redpanda streaming
+# KAFKA_BOOTSTRAP_SERVERS = "broker:9092"
 ```
 
 > **`DATABASE_PATH` must be `/tmp/...`** — Streamlit Cloud repo root is read-only.
 
 ---
 
-## 💡 EV Engine
-
-Before dispatching any recovery action, the pipeline calculates Expected Value:
-
-```
-EV = (P_recovery × Recoverable_Amount) − (Operational_Fee + Gateway_Cost)
-```
-
-| EV | Action |
-|----|--------|
-| EV > threshold (default 0) | **PROCEED** — Razorpay link created + notifications sent |
-| EV ≤ threshold | **BYPASS** — no dispatch; event logged to shadow ledger |
-| EXECUTION_MODE = SHADOW | **SHADOW INTERCEPT** — all dispatches suppressed; counterfactuals logged |
-
-Configure via env vars: `EV_MINIMUM_RUPEES`, `EV_OPERATIONAL_FEE`, `EV_GATEWAY_COST_PCT`, `EXECUTION_MODE`.
-
----
-
-## 🔑 JWT RBAC
-
-Three roles with scoped API access:
-
-| Role | Scope | Use case |
-|------|-------|----------|
-| `admin` | All endpoints | Engineering, platform owners |
-| `operator` | HITL queue + read-only stats | Recovery agents, ops team |
-| `auditor` | Read-only audit + stats | Compliance, finance |
-
-Issue a token:
-```bash
-curl -X POST http://localhost:8000/auth/token \
-  -H "Content-Type: application/json" \
-  -d '{"merchant_id": "mid_001", "api_key": "secret", "role": "admin"}'
-```
-
----
-
 ## 🧪 Testing
 
-100 tests across 2 test files:
+132 tests across 4 test files (1 skipped = live DeepEval):
 
 ```bash
 pip install -r requirements-dev.txt
@@ -165,19 +157,19 @@ pytest tests/ -v --timeout=180
 
 | File | Tests | Coverage |
 |------|-------|---------|
-| `test_enterprise_flow.py` | 59 | HMAC, PII, AES-GCM, audit chain, HITL FSM, CircuitBreaker, KS/PSI, webhook chaos |
-| `test_ev_engine.py` | 41 | EV arithmetic, zero/negative/shadow, tenant isolation, JWT auth, audit chain with EV |
+| `test_enterprise_controls.py` | 7 | EV unit-economic guardrails, Principal RBAC |
+| `test_ev_engine.py` | 67 | EV arithmetic, shadow mode, chaos resilience, bandit, JWT |
+| `test_llm_eval.py` | 14 | LLM faithfulness, tone, hallucination, guardrail, calibration |
+| `test_enterprise_flow.py` | 59 | HMAC, PII, AES-GCM, audit chain, HITL FSM, circuit breaker, webhook chaos |
 
 ---
 
-## 🐳 Docker
+## 🔑 Gmail App Password
 
-```bash
-docker compose up api dashboard
-docker compose --profile dev up      # + simulator
-docker compose --profile chaos up    # + stress tester
-docker compose --profile monitoring up  # + Prometheus + Grafana
-```
+`SMTP_PASS` must be a **16-character App Password**:
+1. [myaccount.google.com](https://myaccount.google.com) → Security → 2-Step Verification → ON
+2. Security → **App passwords** → Mail → Other → `RecoverAI`
+3. Copy the 16-char password → paste as `SMTP_PASS`
 
 ---
 
@@ -185,23 +177,28 @@ docker compose --profile monitoring up  # + Prometheus + Grafana
 
 ```
 RecoverAI/
-├── streamlit_app.py         # 8-tab dashboard (EV Engine tab added)
+├── streamlit_app.py            # 8-tab dashboard + bandit/graph controls
 ├── requirements.txt
 ├── recover_ai/
-│   ├── main.py              # FastAPI: /auth/token + /api/v1/ev/* + /api/v1/shadow/*
-│   ├── ev_engine.py         # EV = P×R−Costs; PROCEED/BYPASS; shadow intercept
-│   ├── auth.py              # JWT HS256; Admin/Operator/Auditor RBAC
-│   ├── db_postgres.py       # Async PG (asyncpg pool, RLS, monthly partitions)
-│   ├── agent_engine.py      # 9-node pipeline with EV gate at Node 8
-│   ├── ml_scorer.py         # LightGBM + KS/PSI drift + hot-swap
-│   ├── database.py          # SQLite WAL + shadow_ledger table + audit ledger
-│   ├── schemas.py           # Pydantic models (EV_BYPASSED status added)
-│   ├── security.py          # PII redaction + HMAC + AES-256-GCM
-│   └── config.py            # All settings incl. EV/JWT/PG tunables
+│   ├── agent_graph.py          # Stateful graph: INGEST→…→REFLECT (Epic 1)
+│   ├── bandit.py               # Thompson Sampling contextual bandit (Epic 2)
+│   ├── kafka_worker.py         # Kafka/Redpanda async streaming (Epic 3)
+│   ├── agent_engine.py         # Linear pipeline (fallback when AGENT_GRAPH=0)
+│   ├── ml_scorer.py            # LightGBM + KS/PSI drift + hot-swap
+│   ├── ev_engine.py            # EV = P×R − Costs; PROCEED/BYPASS
+│   ├── auth.py                 # JWT HS256, Principal, authorize()
+│   ├── expected_value.py       # Deterministic EV guardrails (paise arithmetic)
+│   ├── database.py             # SQLite + SHA-256+HMAC audit ledger + shadow
+│   ├── schemas.py              # Pydantic models
+│   ├── security.py             # PII redaction + HMAC + AES-256-GCM
+│   └── main.py                 # FastAPI gateway
 ├── tests/
-│   ├── test_enterprise_flow.py   # 59 tests
-│   └── test_ev_engine.py         # 41 tests
-└── terraform/               # AWS EKS, Aurora PG, ElastiCache, Secrets Manager
+│   ├── conftest.py             # Cross-module DB/secret isolation
+│   ├── test_enterprise_controls.py   # EV guardrails + RBAC (7 tests)
+│   ├── test_ev_engine.py       # EV + chaos + bandit (67 tests)
+│   ├── test_llm_eval.py        # LLM evaluation harness (14 tests)
+│   └── test_enterprise_flow.py # Integration + chaos (59 tests)
+└── terraform/                  # AWS EKS, Aurora, Redis, Secrets Manager
 ```
 
 ---
@@ -210,15 +207,15 @@ RecoverAI/
 
 | Layer | Implementation |
 |-------|---------------|
-| Webhook auth | HMAC-SHA256 on every inbound event, constant-time compare |
-| PII redaction | Regex + field-name walk before any DB write or LLM call |
-| Audit ledger | SHA-256 hash-chain **+** HMAC-SHA256 per row; tamper index reporting |
-| Column encryption | AES-256-GCM with HKDF key derivation |
-| Discount guardrail | LLM discount capped at 15% (two independent checks) |
-| EV gate | Negative-EV actions bypassed; shadow events recorded as counterfactuals |
-| HITL gate | Transactions > ₹50k or ambiguous ML scores held for human review |
-| JWT RBAC | HS256 tokens, 3 roles, 8-hour expiry, constant-time comparison |
-| Tenant isolation | `merchant_id` on all tables; PostgreSQL RLS enforces row-level access |
+| Webhook auth | HMAC-SHA256 + constant-time compare |
+| PII redaction | Regex + field-name walk before DB/LLM |
+| Audit ledger | SHA-256 hash-chain + HMAC-SHA256 per row |
+| Column encryption | AES-256-GCM with HKDF |
+| Discount guardrail | 15% cap in 2 independent checks + EV guardrail |
+| EV gate | Negative-EV bypassed + shadow logged |
+| HITL gate | >₹50k or ambiguous ML score → human review |
+| JWT RBAC | HS256, Principal, authorize(), 3 roles |
+| Tenant isolation | `merchant_id` on all tables; PostgreSQL RLS in prod |
 
 ---
 
@@ -228,12 +225,13 @@ RecoverAI/
 |-------|-----------|
 | Dashboard | Streamlit 1.40+, Plotly |
 | API | FastAPI, Uvicorn, asyncio |
-| Queue | asyncio.Queue (dev) / Celery + Redis (prod) |
-| ML | LightGBM, scikit-learn, scipy (KS drift) |
+| Agent Graph | Custom stateful graph (LangGraph-compatible) |
+| Bandit | Thompson Sampling + LinUCB + ε-greedy |
+| Queue | asyncio.Queue (dev) / Celery+Redis / Kafka+aiokafka (prod) |
+| ML | LightGBM, KS/PSI drift, hot-swap retraining |
 | Database | SQLite WAL (dev) / PostgreSQL Aurora Serverless v2 (prod) |
-| Integrations | Razorpay Payment Links, Meta WhatsApp Cloud, Twilio, SMTP |
-| Security | HMAC-SHA256, AES-256-GCM, JWT RBAC, PII redaction |
-| EV Engine | Decimal arithmetic, EV gate, shadow ledger, counterfactual logging |
-| Observability | Prometheus, OpenTelemetry spans, Grafana |
+| Security | HMAC-SHA256, AES-256-GCM, JWT HS256, PII redaction |
+| EV Engine | Decimal arithmetic, EV gate, shadow ledger |
+| Observability | Prometheus, OpenTelemetry (9 node spans + token/latency attrs) |
 | IaC | Terraform (AWS EKS Fargate, Aurora PG, ElastiCache Redis) |
-| CI/CD | GitHub Actions: ruff → Bandit SAST → 100 tests → Docker → Terraform → kubectl |
+| CI/CD | GitHub Actions: ruff → Bandit → 132 tests → Docker → Terraform → kubectl |
