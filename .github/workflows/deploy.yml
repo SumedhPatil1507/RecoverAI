@@ -228,6 +228,7 @@ jobs:
           print('anomaly_detection OK — scanner available')
           "
           python -c "
+          import asyncio
           from integrations.whatsapp_notifier import NotificationDispatcher, DispatchRequest, DispatchChannel, DispatchStatus
           d = NotificationDispatcher()
           req = DispatchRequest(
@@ -239,7 +240,7 @@ jobs:
               payment_link='https://rzp.io/i/test',
               channels=[DispatchChannel.WHATSAPP],
           )
-          results = d.dispatch(req)
+          results = asyncio.run(d.dispatch(req))
           assert results[0].status == DispatchStatus.MOCK
           print('whatsapp_notifier OK — mock dispatch:', results[0].dispatch_id)
           "
