@@ -205,7 +205,7 @@ class ChaosResult:
         print(f"  Wall time       : {self.wall_time_s:.2f} s")
         print(f"  Throughput      : {self.total/max(0.001,self.wall_time_s):.1f} req/s")
         if lat:
-            print(f"\n  Latency (ms) — successful ACKs only:")
+            print("\n  Latency (ms) — successful ACKs only:")
             print(f"    min  : {min(lat):.1f}")
             print(f"    mean : {statistics.mean(lat):.1f}")
             print(f"    p50  : {self.percentile(50):.1f}")
@@ -251,7 +251,7 @@ def _run_chaos(n: int = 500, max_workers: int = 64) -> ChaosResult:
     dropped requests.
     """
     print("\n" + "=" * 65)
-    print(f"  RecoverAI Chaos Stress Test")
+    print("  RecoverAI Chaos Stress Test")
     print(f"  Target  : {settings.webhook_base_url}")
     print(f"  Events  : {n}")
     print(f"  Workers : {max_workers} concurrent threads")

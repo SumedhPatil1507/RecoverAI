@@ -305,11 +305,6 @@ async def _llm_decide(
         except ValueError:
             action = RecoveryActionType.NOTIFY_SUPPORT
 
-        try:
-            cat_override = FailureCategory(parsed.get("failure_category", category.value))
-        except ValueError:
-            cat_override = category
-
         new_status = (
             TransactionStatus.EXPIRED
             if attempts + 1 >= settings.max_recovery_attempts

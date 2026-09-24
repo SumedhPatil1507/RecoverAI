@@ -249,7 +249,8 @@ async def _send_sms(req: DispatchRequest, sid: str, token: str, from_num: str) -
                               req.recipient_phone, f"mock_{did[:8]}", ts, mock=True)
 
     try:
-        import httpx, base64 as _b64
+        import base64 as _b64
+        import httpx
         auth = _b64.b64encode(f"{sid}:{token}".encode()).decode()
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(

@@ -4,9 +4,11 @@ All financial amounts are stored as INTEGER PAISE to avoid float imprecision.
 """
 from __future__ import annotations
 
-import os, sys
+import os
+import sys
 _pkg = os.path.dirname(os.path.abspath(__file__))
-if _pkg not in sys.path: sys.path.insert(0, _pkg)
+if _pkg not in sys.path:
+    sys.path.insert(0, _pkg)
 
 from decimal import Decimal
 from enum import Enum
