@@ -50,7 +50,7 @@ from security import redact_pii, signature_required
 # ── Auth / RBAC (JWT) ────────────────────────────────────────────────────────
 try:
     from auth import (
-        Role, TokenData, TokenRequest, TokenResponse,
+        Principal, Role, TokenData, TokenRequest, TokenResponse, decode_token,
         issue_token, require_role, require_admin, require_operator, require_auditor,
     )
     _AUTH_AVAILABLE = True
@@ -130,11 +130,15 @@ async def _tenant_auth(request: Request, call_next):
     bearer = request.headers.get("Authorization", "")
     if bearer.lower().startswith("bearer "):
         try:
-            request.state.principal = decode_bearer_token(
-                bearer[7:].strip(), settings.jwt_secret
+            claims = decode_token(bearer[7:].strip())
+            subject = str(claims.get("sub", ""))
+            request.state.principal = Principal(
+                subject=subject,
+                tenant_id=str(claims.get("tenant_id") or subject),
+                role=str(claims.get("role", "")),
             )
             request.state.merchant_id = request.state.principal.tenant_id
-        except ValueError:
+        except (ValueError, TypeError):
             return JSONResponse(status_code=401, content={"detail": "Invalid bearer token"})
     keys = _tenant_keys()
     if request.state.principal is not None:
