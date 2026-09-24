@@ -191,6 +191,7 @@ jobs:
           print(f'ml_scorer OK — score={score}')
           "
           python -c "
+          import asyncio
           from integrations.razorpay_links import RazorpayLinksClient, PaymentLinkRequest, PaymentLinkCustomer
           client = RazorpayLinksClient(mock=True)
           req = PaymentLinkRequest(
@@ -199,7 +200,7 @@ jobs:
               customer=PaymentLinkCustomer(email='test@example.com'),
               reference_id='pay_test123',
           )
-          result = client.create(req)
+          result = asyncio.run(client.create(req))
           assert result.status == 'created'
           assert 'rzp.io' in result.short_url
           print('razorpay_links OK — mock link:', result.short_url)
