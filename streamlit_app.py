@@ -12,6 +12,7 @@ Tabs:
   5. A/B Testing            — Recovery strategy A/B engine
   6. Chaos Simulator        — Webhook stress & chaos testing
   7. Merchants              — Multi-tenant merchant isolation
+  8. EV Engine              — Expected value, shadow ledger, and RBAC inspector
 """
 from __future__ import annotations
 
@@ -81,8 +82,9 @@ def _seed_demo_data(n: int = 60) -> int:
     without needing the FastAPI server running.
     Returns the number of rows inserted.
     """
-    import random, uuid, hashlib, hmac as _hmac
-    from datetime import datetime, timezone, timedelta
+    import random
+    import uuid
+    import hmac as _hmac
 
     SCENARIOS = [
         ("GATEWAY_ERROR",      "GATEWAY_DOWN",       0.72),
@@ -99,8 +101,6 @@ def _seed_demo_data(n: int = 60) -> int:
     WEIGHTS  = [5, 8, 10, 15, 12, 35, 8, 7]
 
     inserted = 0
-    base_time = datetime.now(timezone.utc) - timedelta(hours=6)
-
     for i in range(n):
         sc          = random.choice(SCENARIOS)
         err_code, cat, base_rate = sc
@@ -109,14 +109,12 @@ def _seed_demo_data(n: int = 60) -> int:
         amount_p    = random.randint(50_000, 1_500_000)   # ₹500 – ₹15,000
         score       = round(min(max(base_rate + random.uniform(-0.15, 0.15), 0.02), 0.98), 4)
         status      = random.choices(STATUSES, weights=WEIGHTS, k=1)[0]
-        created_at  = (base_time + timedelta(minutes=i * 6 + random.randint(0, 5))).isoformat()
-
         try:
             _db.upsert_transaction(
                 payment_id, order_id, amount_p, "INR",
                 err_code,
                 f"Synthetic: {err_code.lower().replace('_', ' ')}",
-                f"u***@example.com",
+                "u***@example.com",
             )
             _db.update_transaction(
                 payment_id, status,
@@ -541,8 +539,8 @@ with tab2:
         # Summary metrics
         if links:
             total   = len(links)
-            paid    = sum(1 for l in links if l["status"] == "paid")
-            expired = sum(1 for l in links if l["status"] == "expired")
+            paid    = sum(1 for link in links if link["status"] == "paid")
+            expired = sum(1 for link in links if link["status"] == "expired")
             m1, m2, m3 = st.columns(3)
             m1.metric("Total Links",  total)
             m2.metric("Paid",         paid,    delta=f"{paid/total*100:.0f}%" if total else "0%")

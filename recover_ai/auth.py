@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
@@ -116,7 +117,10 @@ def create_token(merchant_id: str, role: Role) -> str:
         return _jwt.encode(payload, secret, algorithm=algorithm)
     except ImportError:
         # Minimal fallback: base64url(header).base64url(payload).HMAC
-        import base64, hashlib, hmac as _hmac, json as _json
+        import base64
+        import hashlib
+        import hmac as _hmac
+        import json as _json
         def _b64(data: bytes) -> str:
             return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
@@ -145,7 +149,11 @@ def decode_token(token: str) -> dict[str, Any]:
         pass
 
     # Minimal fallback verifier
-    import base64, hashlib, hmac as _hmac, json as _json, time
+    import base64
+    import hashlib
+    import hmac as _hmac
+    import json as _json
+    import time
 
     def _b64dec(s: str) -> bytes:
         padding = 4 - len(s) % 4
@@ -180,6 +188,47 @@ class TokenData:
     def __init__(self, merchant_id: str, role: Role) -> None:
         self.merchant_id = merchant_id
         self.role        = role
+
+
+@dataclass(frozen=True, slots=True)
+class Principal:
+    """Identity and tenant claim extracted from a verified access token."""
+
+    subject: str
+    tenant_id: str
+    role: str
+
+    def __post_init__(self) -> None:
+        if not self.subject or not self.tenant_id:
+            raise ValueError("subject and tenant_id are required")
+        normalized = self.role.value if isinstance(self.role, Enum) else str(self.role)
+        normalized = normalized.lower()
+        if normalized == "admin":
+            normalized = "enterprise_admin"
+        object.__setattr__(self, "role", normalized)
+
+
+def authorize(principal: Principal, *allowed_roles: str | Role) -> None:
+    """Raise ``PermissionError`` unless the principal has an allowed role.
+
+    ``enterprise_admin`` and the public JWT role ``admin`` are aliases. The
+    function is deliberately independent of FastAPI so domain code can apply
+    the same role checks outside request handlers.
+    """
+    role = principal.role.value if isinstance(principal.role, Enum) else str(principal.role)
+    role = role.lower()
+    if role == "admin":
+        role = "enterprise_admin"
+    allowed = {
+        (candidate.value if isinstance(candidate, Enum) else str(candidate)).lower()
+        for candidate in allowed_roles
+    }
+    if "admin" in allowed:
+        allowed.add("enterprise_admin")
+    if role not in allowed:
+        raise PermissionError(
+            f"Role {role!r} is not authorized; required one of {sorted(allowed)!r}"
+        )
 
 
 def _extract_token_data(
