@@ -1,139 +1,209 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/RecoverAI-Enterprise-gold?style=for-the-badge&logo=razorpay&logoColor=white" alt="RecoverAI Enterprise" height="40"/>
-
 # 🏦 RecoverAI Enterprise
 
-### *Agentic Payment Recovery · Razorpay AI Buildathon · Track 03*
+### Agentic Payment Recovery Platform
 
-<br/>
+*Razorpay AI Buildathon · Track 03*
+
+---
 
 [![Live Demo](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://recoverai-enterprise.streamlit.app)
-&nbsp;
-[![Tests](https://img.shields.io/badge/tests-132%20passed-00c851?style=flat-square&logo=pytest&logoColor=white)](tests/)
-&nbsp;
-[![Python](https://img.shields.io/badge/python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-&nbsp;
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-&nbsp;
+&nbsp;&nbsp;
+[![Tests](https://img.shields.io/badge/✅%20132%20tests%20passing-00c851?style=flat-square)](tests/)
+&nbsp;&nbsp;
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://python.org)
+&nbsp;&nbsp;
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+&nbsp;&nbsp;
 [![License: MIT](https://img.shields.io/badge/License-MIT-f0ad4e?style=flat-square)](LICENSE)
 
 <br/>
 
-**RecoverAI autonomously recovers failed Razorpay payments using a stateful multi-agent graph,  
-Thompson Sampling bandit routing, ML scoring, unit-economic EV guardrails,  
-HITL approval workflows, and a tamper-proof cryptographic audit ledger.**
+> **RecoverAI autonomously recovers failed Razorpay payments using a stateful multi-agent pipeline.**  
+> Thompson Sampling bandit routing · LightGBM ML scoring · EV guardrails · HITL approvals · Cryptographic audit ledger
 
 <br/>
 
-[**🚀 Live Demo**](https://recoverai-enterprise.streamlit.app) &nbsp;·&nbsp; [**⚡ Quick Start**](#-quick-start) &nbsp;·&nbsp; [**🏗 Architecture**](#-architecture) &nbsp;·&nbsp; [**🧪 Tests**](#-testing)
+**[🚀 Live Demo](https://recoverai-enterprise.streamlit.app)** &nbsp;·&nbsp; **[⚡ Quick Start](#-quick-start)** &nbsp;·&nbsp; **[🏗 Architecture](#-architecture)** &nbsp;·&nbsp; **[📊 Outcomes](#-outcomes)**
 
 </div>
 
 ---
 
-## 🎯 What RecoverAI Does
+## 💡 The Problem & Solution
 
-When a payment fails on Razorpay, RecoverAI:
+> **85% of failed payments are recoverable — but most platforms never attempt it.**
 
-| Step | What happens | Time |
-|------|-------------|------|
-| **Ingest** | HMAC-verified webhook received, payment_id enqueued | < 1 ms |
-| **Score** | LightGBM predicts recoverability 0–1 with KS/PSI drift detection | < 5 ms |
-| **Route** | Thompson Sampling bandit selects control vs variant arm | < 1 ms |
-| **Classify** | Root cause classified (gateway down / insufficient funds / etc.) | < 2 ms |
-| **EV Gate** | `EV = P × R − (OpFee + GwCost)` — skips uneconomic recoveries | < 1 ms |
-| **Dispatch** | Razorpay Payment Link created + WhatsApp / SMS / Email sent | async |
-| **Monitor** | Outcome observed; REFLECT self-heals on failure | async |
-| **Log** | Immutable SHA-256 + HMAC cryptographic audit entry written | < 2 ms |
+RecoverAI intercepts every `payment.failed` webhook, scores the transaction with a LightGBM model, routes it through a unit-economic EV gate, and dispatches a personalised recovery link via WhatsApp / SMS / Email — all within milliseconds, with zero manual intervention.
 
-**Webhook ACK returns `202 Accepted` in < 15 ms** — all heavy work is async.
+```
+Payment fails → HMAC webhook → Score → EV Gate → Dispatch → Monitor → Heal → Log
+                    < 15 ms ACK                            async workers
+```
 
 ---
 
-## ✨ Feature Overview
+## ✨ Feature Showcase
 
-<table>
-<tr>
-<td width="50%" valign="top">
+### 📊 Tab 1 — Intelligence Hub
 
-### 📊 Intelligence Hub
-Real-time KPIs — revenue at risk, recovered, recovery rate, avg ML score, ledger status. ML-augmented recovery funnel, dual-trace time-series chart, ML score histogram, failure root-cause donut, and one-click SHA-256 + HMAC ledger verification with tamper-index reporting.
+| What you see | What it means |
+|---|---|
+| Revenue at Risk vs Recovered | Live ₹ impact across all failed transactions |
+| ML-Augmented Recovery Funnel | Ingested → Scored → Evaluated → Dispatched → Recovered |
+| Failure Root-Cause Donut | GATEWAY_DOWN / INSUFFICIENT_FUNDS / BANK_DECLINE / etc. |
+| Time-Series Chart | Dual-trace: revenue at risk vs recovered over time |
+| ML Score Histogram | Distribution of LightGBM recoverability scores |
+| Audit Ledger Verify | One-click SHA-256 + HMAC chain verification with tamper-index |
 
-### 🔗 Payment Links
-Razorpay Payment Links API with async circuit breaker (CLOSED → OPEN → HALF-OPEN), **smart routing** for GATEWAY_DOWN / BANK_DECLINE failures, 15 % discount hard-cap guardrail, and bulk-create for batch recoveries.
+**Outcome:** Full operational visibility into recovery pipeline health in real time.
 
-### 📨 Multi-Channel Dispatch
-WhatsApp Business Cloud API, Twilio SMS, and SMTP email — each channel has its **own independent circuit breaker**. Auto-fallback: WhatsApp → SMS → Email → HITL notification.
+---
 
-### 👤 HITL Approvals + ROI Calculator
-Human-in-the-Loop approval queue for transactions > ₹50k or ambiguous ML scores. Built-in **A/B Financial Lift & ROI Calculator** with Z-score significance testing, net revenue lift, margin analysis, and discount sensitivity slider.
+### 🔗 Tab 2 — Razorpay Payment Links
 
-</td>
-<td width="50%" valign="top">
+- **Async HTTP client** with connection pooling targeting `/v1/payment_links`
+- **Circuit Breaker** — CLOSED → OPEN → HALF-OPEN with configurable thresholds
+- **Smart Routing** — alternative UPI/wallet checkout for GATEWAY_DOWN and BANK_DECLINE
+- **15% discount hard-cap** enforced at two independent layers
+- **Bulk creation** for batch recovery campaigns
+- **Callback signature verification** for inbound Razorpay callbacks
 
-### 🧪 A/B Testing Engine
-Live experiment engine comparing rule engine (control) vs LLM-augmented (variant). Real-time recovery rates, lift %, confidence intervals, and historical experiment table.
+**Outcome:** Payment links created and dispatched with zero blocking on provider outages.
 
-### 💥 Chaos Simulator
-Fire **500 concurrent HMAC-signed webhooks** from the UI. Reports p50 / p95 / p99 latency, throughput (req/s), and SLA pass/fail verdict. Also tests dispatch circuit breakers under sustained load.
+---
 
-### 🏢 Multi-Tenant Merchants
-Per-merchant dashboards with plan tiers, simulated recovery timelines, comparison bar chart, and tenant isolation audit table showing DB namespace, API scope, and rate limits.
+### 📨 Tab 3 — Multi-Channel Dispatch
 
-### 💡 EV Engine & Agent Graph
-EV calculator with live decision, 2-D heat-map, breakeven chart, shadow ledger browser, **Thompson Sampling bandit arm report**, and an interactive agent graph node-transition diagram with Kafka streaming status.
+Three channels, each with its **own independent circuit breaker**:
 
-</td>
-</tr>
-</table>
+| Channel | Provider | Circuit Breaker | Fallback |
+|---|---|---|---|
+| 📱 WhatsApp | Meta Business Cloud API | 3 failures → OPEN 60s | → SMS |
+| 💬 SMS | Twilio REST API | 3 failures → OPEN 60s | → Email |
+| 📧 Email | SMTP (Gmail / any) | 5 failures → OPEN 120s | → HITL notify |
+
+Auto-fallback chain: **WhatsApp → SMS → Email → HITL notification**
+
+**Outcome:** Zero dropped notifications — if WhatsApp is down, SMS fires; if SMS fails, Email takes over.
+
+---
+
+### 👤 Tab 4 — HITL Approvals + ROI Calculator
+
+**Human-in-the-Loop queue** automatically triggered when:
+- Transaction amount > ₹50,000 (HIGH_VALUE)
+- LLM proposed discount > 10% (HIGH_DISCOUNT)
+- ML score in ambiguous band 0.40–0.60 (AMBIGUOUS_SCORE)
+- 3+ prior failed attempts (REPEATED_FAIL)
+
+**Built-in ROI Calculator** computes:
+- Net Recovered Revenue (₹) after AI costs and gateway fees
+- Recovery rate lift % with Z-score statistical significance (95% CI)
+- Revenue waterfall chart: Control → Variant
+- Discount sensitivity what-if slider (0–15%)
+
+**Outcome:** Every high-stakes decision has a human gate; operators see exact ROI before approving.
+
+---
+
+### 🧪 Tab 5 — A/B Testing Engine
+
+- **Thompson Sampling** contextual bandit selects strategy arms in real time
+- Context buckets: failure category × ML score band × amount band
+- Live metrics: recovery rate, lift %, confidence intervals
+- Statistical significance test at 95% CI (Z-score)
+- Historical experiment table with past campaign results
+- Modes: `thompson` (default) · `linucb` · `epsilon_greedy`
+
+**Outcome:** Recovery strategy continuously improves based on real outcomes — no manual A/B setup.
+
+---
+
+### 💥 Tab 6 — Chaos Simulator
+
+Fire **500 concurrent HMAC-signed webhooks** directly from the browser:
+- Real-time latency histogram (p50 / p95 / p99)
+- Throughput (requests/second)
+- SLA pass/fail verdict (< 15 ms target)
+- Chaos modes: payload corruption, duplicate injection, oversized payloads, bad signatures
+
+**Outcome:** Demonstrates sub-15ms ACK SLA under 500 concurrent requests with 0 dropped webhooks.
+
+---
+
+### 🏢 Tab 7 — Multi-Tenant Merchants
+
+- Per-merchant dashboards with isolated data views
+- Plan tiers: Starter / Growth / Enterprise with rate limits
+- Simulated revenue recovery time-series per merchant
+- Tenant isolation audit table — DB namespace, API scope, enforcement status
+- Multi-tenant comparison bar chart
+
+**Outcome:** Enterprise SaaS isolation — Tenant A can never see Tenant B's data.
+
+---
+
+### 💡 Tab 8 — EV Engine & Agent Graph
+
+**Expected Value Calculator:**
+- Live EV = P × R − (OpFee + GwCost) with PROCEED / BYPASS / SHADOW decision
+- 2-D heat-map: ML score vs discount → EV colour gradient
+- Breakeven chart: minimum P required to PROCEED at each discount level
+- Shadow ledger browser — browse all bypass and SHADOW intercept events
+
+**Thompson Sampling Bandit Report:**
+- Live arm performance chart per context bucket
+- Alpha / Beta / Mean / Pulls per arm
+
+**Agent Graph Diagram:**
+- Interactive stateful pipeline: INGEST → SCORE → ROOT_CAUSE → EV_GATE → DISPATCH → MONITOR → REFLECT
+- Kafka/Redpanda streaming status
+
+**Outcome:** Full observability into why actions were taken, bypassed, or self-healed.
 
 ---
 
 ## 🏗 Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Razorpay  POST /webhook/razorpay                                       │
-│  ── HMAC-SHA256 verified ──────────────── 202 ACK in < 15 ms ──────────│
-└──────────────────────────────┬──────────────────────────────────────────┘
-                               │
-              ┌────────────────▼──────────────────┐
-              │  Kafka / Redpanda  (aiokafka)      │  ← USE_KAFKA=1
-              │  asyncio.Queue    (dev/Streamlit)  │  ← default
-              │  Celery + Redis   (USE_CELERY=1)   │
-              │  Idempotency: Redis SET NX 24 h    │
-              └────────────────┬──────────────────┘
-                               │
-   ┌───────────────────────────▼────────────────────────────────────────┐
-   │                  agent_graph.py  ─  Stateful Agent Graph           │
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Razorpay  →  POST /webhook/razorpay                                     │
+│  HMAC-SHA256 verified  ──────────────────  202 ACK returned in < 15 ms  │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │
+            ┌────────────────▼─────────────────────┐
+            │  Event Queue (3 backends)             │
+            │  ├─ asyncio.Queue    (dev / Cloud)    │
+            │  ├─ Celery + Redis   (USE_CELERY=1)   │
+            │  └─ Kafka/Redpanda   (USE_KAFKA=1)    │
+            │  Idempotency: Redis SET NX  TTL=24h   │
+            └────────────────┬─────────────────────┘
+                             │
+   ┌─────────────────────────▼──────────────────────────────────────────┐
+   │                 agent_graph.py — Stateful Agent Graph              │
    │                                                                    │
-   │  INGEST ──► SCORE ──► ROOT_CAUSE                                   │
-   │                           │                                        │
-   │              ┌────────────▼───────────────┐                        │
-   │              │  Contextual Bandit          │                        │
-   │              │  Thompson Sampling β(α,β)   │                        │
-   │              │  per (category×band×amount) │                        │
-   │              └────────────┬───────────────┘                        │
-   │                           │                                        │
-   │                        EV_GATE                                     │
-   │              EV = P × R − (OpFee + GwCost)                         │
-   │                 ├─ EV ≤ 0  ──► shadow_ledger  +  BYPASS            │
-   │                 └─ EV > 0  ──► DISPATCH                            │
-   │                                    │                               │
-   │                               MONITOR                              │
-   │                           ├─ ok  ──► AUDIT_LOG  ──► TERMINAL       │
-   │                           └─ fail ──► REFLECT                      │
-   │                                           │                        │
-   │                         (fallback channel + lower op_fee)          │
-   │                               ──► EV_GATE  (max 2 cycles)          │
+   │   INGEST ──▶ SCORE ──▶ ROOT_CAUSE ──▶ Contextual Bandit            │
+   │                                            │                       │
+   │                                         EV_GATE                   │
+   │                              EV = P × R − (OpFee + GwCost)         │
+   │                              ├─ BYPASS ──▶ shadow_ledger           │
+   │                              └─ PROCEED ──▶ DISPATCH               │
+   │                                                 │                  │
+   │                                            MONITOR                 │
+   │                                      ├─ ok ──▶ AUDIT_LOG           │
+   │                                      └─ fail ──▶ REFLECT           │
+   │                                                     │              │
+   │                              (select fallback channel,             │
+   │                               reduce op_fee, retry EV_GATE)        │
    └────────────────────────────────────────────────────────────────────┘
-                               │
-   ┌───────────────────────────▼────────────────────────────────────────┐
-   │  SQLite WAL (dev/Streamlit Cloud)                                  │
-   │  PostgreSQL Aurora Serverless v2 (production)                      │
-   │  ── Row-Level Security · Monthly range partitions ─────────────── │
-   │  ── SHA-256 hash-chain + HMAC-SHA256 per-row audit ledger ──────── │
+                             │
+   ┌─────────────────────────▼──────────────────────────────────────────┐
+   │  Storage                                                           │
+   │  ├─ SQLite WAL          (dev / Streamlit Cloud)                    │
+   │  └─ PostgreSQL Aurora   (production — RLS + monthly partitions)    │
+   │  SHA-256 hash-chain + HMAC-SHA256 per-row immutable audit ledger   │
    └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -141,150 +211,175 @@ EV calculator with live decision, 2-D heat-map, breakeven chart, shadow ledger b
 
 ## 🚀 Quick Start
 
-### Run locally (< 2 minutes)
+### Option 1 — Streamlit Cloud (no install)
+
+**[recoverai-enterprise.streamlit.app](https://recoverai-enterprise.streamlit.app)** — click and it works. No secrets required.
+
+---
+
+### Option 2 — Run locally
 
 ```bash
 git clone https://github.com/SumedhPatil1507/RecoverAI.git
 cd RecoverAI
 
-# Create and activate virtual environment
 python -m venv .venv
-source .venv/bin/activate          # Linux / macOS
+source .venv/bin/activate          # Linux/macOS
 .venv\Scripts\Activate.ps1         # Windows PowerShell
 
-pip install --upgrade pip
 pip install -r requirements.txt
-
 streamlit run streamlit_app.py
+# → opens http://localhost:8501
 ```
 
-Open **http://localhost:8501**. The dashboard auto-seeds 60 synthetic transactions — every chart populates immediately. Click **🌱 Seed Demo Data** in the sidebar to add more.
+> First launch auto-seeds 60 synthetic transactions. Every chart populates immediately.  
+> Click **🌱 Seed Demo Data** in the sidebar to add more.
 
-> **Demo safety:** `streamlit_app.py` forces `ENVIRONMENT=staging`, `EXECUTION_MODE=SHADOW`, and `DATABASE_PATH=/tmp/...` at startup. **No live payments, notifications, or API calls are made.**
+---
 
-### Run the FastAPI service (optional)
+### Option 3 — Docker
+
+```bash
+# Dashboard + API
+docker compose up api dashboard
+
+# With extras
+docker compose --profile dev up          # + data simulator
+docker compose --profile chaos up        # + stress tester
+docker compose --profile monitoring up   # + Prometheus + Grafana (:3000)
+```
+
+---
+
+### Option 4 — Run the FastAPI API separately
 
 ```bash
 uvicorn recover_ai.main:app --host 0.0.0.0 --port 8000
 
-# Send 20 synthetic webhook events
-python recover_ai/data_simulator.py --burst 20
+# Simulate payment failures
+python recover_ai/data_simulator.py --burst 50
 
-# Chaos stress test (500 concurrent webhooks)
+# Chaos stress test (500 concurrent HMAC webhooks)
 python recover_ai/data_simulator.py --chaos 500
-```
-
-### Docker
-
-```bash
-docker compose up api dashboard            # core stack
-docker compose --profile dev up            # + data simulator
-docker compose --profile chaos up          # + stress tester
-docker compose --profile monitoring up     # + Prometheus + Grafana
 ```
 
 ---
 
-## ☁️ Deploy on Streamlit Community Cloud
+## ☁️ Deploy to Streamlit Community Cloud
 
-1. Go to **[share.streamlit.io](https://share.streamlit.io)** → **New app**
-2. Repository: `SumedhPatil1507/RecoverAI` · Branch: `main` · Main file: `streamlit_app.py`
-3. Click **Deploy** — **no secrets required** for the staging demo
+1. **Fork** or use `SumedhPatil1507/RecoverAI`
+2. [share.streamlit.io](https://share.streamlit.io) → **New app** → branch `main` → main file `streamlit_app.py`
+3. **Deploy** — no secrets needed for the demo
 
-### Optional secrets (for full features)
+### Add secrets for full features
 
-Navigate to your app → **⋮ → Settings → Secrets** and paste:
+App → **⋮ → Settings → Secrets**:
 
 ```toml
-# ── Database (required on Streamlit Cloud) ────────────────────────────────
+# Required on Streamlit Cloud
 DATABASE_PATH = "/tmp/recover_ai_enterprise.db"
 ML_MODEL_PATH = "/tmp/recover_ai_lgbm.pkl"
 
-# ── Razorpay (dashboard.razorpay.com → Settings → API Keys) ─────────────
+# Razorpay keys  (dashboard.razorpay.com → Settings → API Keys)
 RAZORPAY_WEBHOOK_SECRET = "your_webhook_secret"
 RAZORPAY_KEY_ID         = "rzp_test_xxxxxxxxxxxx"
 RAZORPAY_KEY_SECRET     = "your_key_secret"
 
-# ── Security (generate: python -c "import secrets; print(secrets.token_hex(32))") ──
-AUDIT_HMAC_KEY = "your_64_char_hex_key"
-JWT_SECRET_KEY = "your_64_char_jwt_key"
+# Security keys  (python -c "import secrets; print(secrets.token_hex(32))")
+AUDIT_HMAC_KEY = "64-char-hex"
+JWT_SECRET_KEY  = "64-char-hex"
 
-# ── Optional: OpenAI (leave blank = rule engine only) ────────────────────
+# Optional — leave blank for rule-engine-only mode
 OPENAI_API_KEY = ""
 
-# ── Optional: Gmail SMTP ─────────────────────────────────────────────────
-# App Password: myaccount.google.com → Security → App passwords
+# Optional — Gmail SMTP (App Password, not account password)
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = "587"
-SMTP_USER = "your@gmail.com"
-SMTP_PASS = "your_16_char_app_password"
-SMTP_FROM = "your@gmail.com"
+SMTP_USER = "you@gmail.com"
+SMTP_PASS = "16-char-app-password"
 
-# ── Optional: Agent graph + bandit ───────────────────────────────────────
-AGENT_GRAPH = "0"        # "1" activates stateful graph
-BANDIT_MODE = "thompson" # or "linucb" or "epsilon_greedy"
-
-# ── Optional: Kafka/Redpanda streaming ───────────────────────────────────
-# KAFKA_BOOTSTRAP_SERVERS = "broker:9092"
+# Optional — agent graph + bandit mode
+AGENT_GRAPH = "0"        # set "1" to enable stateful cyclic graph
+BANDIT_MODE = "thompson" # thompson | linucb | epsilon_greedy
 ```
 
 ---
 
-## 💡 Expected-Value Guardrail
-
-Every recovery action is gated by a unit-economic calculation using **Decimal arithmetic** (no float rounding):
-
-```
-EV = (P_recovery × Recoverable_Amount) − (Operational_Fee + Gateway_Cost)
-```
-
-| EV result | Action |
-|-----------|--------|
-| `EV > threshold` (default 0) + LIVE mode | **PROCEED** — dispatch payment link + notification |
-| `EV ≤ threshold` | **BYPASS** — no dispatch; event logged to shadow ledger |
-| `EXECUTION_MODE=SHADOW` | **SHADOW INTERCEPT** — all dispatches suppressed; counterfactuals logged |
-
-Configure via: `EV_MINIMUM_RUPEES`, `EV_OPERATIONAL_FEE`, `EV_GATEWAY_COST_PCT`, `EXECUTION_MODE`
-
----
-
-## 📊 Key Outcomes
+## 📊 Outcomes
 
 | Metric | Result |
-|--------|--------|
-| Webhook ACK latency | **< 15 ms p99** (202 Accepted) |
-| ML recoverability scoring | LightGBM + LogisticRegression fallback, Brier < 0.30 |
+|---|---|
+| Webhook ACK latency | **< 15 ms p99** — `202 Accepted`, all work async |
+| Throughput | **> 1 000 txns/min** per worker process |
+| ML recoverability | LightGBM Brier score < 0.30; LogisticRegression fallback |
 | Drift detection | KS two-sample test + PSI on 500-call sliding window |
-| Hot-swap retraining | `os.replace()` atomic swap — zero downtime |
-| EV gate precision | Pure `Decimal` arithmetic — no float rounding errors |
-| Audit ledger | SHA-256 hash-chain + HMAC-SHA256 per row, `verify_audit_integrity_detailed()` with tampered log_id list |
-| Discount guardrail | Hard-capped at 15 % in two independent checks (schema + pipeline) |
-| Dispatch resilience | Circuit breaker per channel (WA/SMS/Email) + REFLECT self-healing |
+| Model hot-swap | `os.replace()` atomic — zero downtime on retrain |
+| EV precision | Pure `Decimal` arithmetic — no floating-point drift |
+| Audit integrity | SHA-256 chain + HMAC-SHA256 per row; tampered `log_id` list on breach |
+| Discount guardrail | Hard-capped at 15 % at schema level AND pipeline level |
+| Dispatch resilience | Per-channel circuit breaker + REFLECT fallback (2 cycles) |
 | Test coverage | **132 tests**, 4 isolated files, cross-module secret isolation |
+| Security | HMAC webhook auth, AES-256-GCM column encryption, JWT RBAC |
+| Infrastructure | Terraform IaC — EKS Fargate, Aurora PG Serverless v2, Redis |
 
 ---
 
-## 🧪 Testing
+## 🧪 Tests
 
 ```bash
 pip install -r requirements-dev.txt
 pytest tests/ -q --timeout=180
+# → 132 passed, 1 skipped (live DeepEval — requires OPENAI_API_KEY)
 ```
 
-| File | Tests | Coverage |
-|------|------:|---------|
-| `test_enterprise_controls.py` | 7 | EV paise-exact arithmetic, `Principal` RBAC, `authorize()` |
-| `test_ev_engine.py` | 67 | EV edge cases, shadow mode, chaos resilience, Thompson bandit, JWT |
-| `test_llm_eval.py` | 14 | LLM faithfulness ≥ 0.80, tone compliance, zero hallucination, calibration |
-| `test_enterprise_flow.py` | 59 | HMAC, PII, AES-GCM, audit tamper detection, HITL FSM, circuit breaker, 500-concurrent chaos |
+| Test file | Count | Covers |
+|---|---:|---|
+| `test_enterprise_controls.py` | 7 | EV paise arithmetic, Principal RBAC, `authorize()` |
+| `test_ev_engine.py` | 67 | EV edge cases, shadow mode, chaos, Thompson bandit, JWT |
+| `test_llm_eval.py` | 14 | LLM faithfulness ≥ 0.80, tone, hallucination, guardrail |
+| `test_enterprise_flow.py` | 59 | HMAC, PII, AES-GCM, tamper detection, HITL FSM, 500-concurrent chaos |
 
-### Chaos test highlights
+**Chaos scenarios tested:**
+- DB partition failure mid-write → chain survives
+- Thread worker crash after first write → no corruption
+- 20 threads × 5 concurrent writes → all entries recoverable
+- Mid-chain hash corruption → `verify_audit_integrity_detailed()` returns exact tampered `log_id`s
+- 500 concurrent webhooks → 0 dropped, p95 within SLA
 
-- **DB partition failure** — forced connection close mid-write; chain survives intact
-- **Thread worker crash** — daemon thread killed after first write; no corruption
-- **Concurrent write storm** — 20 threads × 5 writes each; all entries recoverable
-- **Mid-chain corruption** — corrupt entry #2; `verify_audit_integrity_detailed()` returns exact tampered `log_id`s
-- **EV bypass under load** — 20 concurrent threads write shadow ledger; 0 entries lost
+---
+
+## 🔐 Security
+
+| Control | How it works |
+|---|---|
+| Webhook auth | HMAC-SHA256 on every request, constant-time compare |
+| PII redaction | Regex + field-name walk strips email/phone/card before DB or LLM |
+| Audit ledger | SHA-256 hash-chain + HMAC-SHA256 per row, SOC2-style tamper report |
+| Column encryption | AES-256-GCM, HKDF-SHA256 key derivation, b64 fallback |
+| Discount cap | 15 % max enforced in Pydantic schema validator + pipeline outer check |
+| EV gate | Negative-EV actions always bypassed; counterfactuals in shadow ledger |
+| HITL gate | > ₹50k or ambiguous ML score → human approval before dispatch |
+| JWT RBAC | HS256, 3 roles (Admin / Operator / Auditor), `Principal`, `authorize()` |
+| Tenant isolation | `merchant_id` on every table; PostgreSQL RLS in production |
+
+---
+
+## 🛠 Tech Stack
+
+| | Technology |
+|---|---|
+| **Dashboard** | Streamlit 1.40+, Plotly WebGL |
+| **API** | FastAPI, Uvicorn, asyncio |
+| **Agent graph** | Custom stateful cyclic graph (LangGraph-compatible) |
+| **Bandit** | Thompson Sampling β(α,β) · LinUCB · ε-greedy |
+| **Queue** | asyncio.Queue · Celery + Redis · Kafka/Redpanda (aiokafka) |
+| **ML** | LightGBM, scikit-learn, scipy (KS + PSI drift) |
+| **Database** | SQLite WAL (dev) · PostgreSQL Aurora Serverless v2 (prod) |
+| **Security** | HMAC-SHA256 · AES-256-GCM · JWT HS256 · PII redaction |
+| **EV engine** | Pure `Decimal` arithmetic |
+| **Observability** | Prometheus `/metrics` · OpenTelemetry 9-node spans |
+| **IaC** | Terraform — EKS Fargate · Aurora PG · ElastiCache · Secrets Manager |
+| **CI/CD** | GitHub Actions 8-stage: ruff → Bandit → 132 tests → Docker → Terraform → kubectl |
 
 ---
 
@@ -292,86 +387,47 @@ pytest tests/ -q --timeout=180
 
 ```
 RecoverAI/
-├── streamlit_app.py              # 8-tab Streamlit demo dashboard
-├── requirements.txt              # Runtime dependencies
-├── requirements-dev.txt          # Test + lint tooling
-│
+├── streamlit_app.py          # 8-tab Streamlit demo (no secrets needed)
+├── requirements.txt
 ├── recover_ai/
-│   ├── agent_graph.py            # ★ Stateful graph runner (Epic 1)
-│   ├── bandit.py                 # ★ Thompson Sampling contextual bandit (Epic 2)
-│   ├── kafka_worker.py           # ★ Kafka/Redpanda async streaming (Epic 3)
-│   ├── agent_engine.py           # Linear pipeline (AGENT_GRAPH=0 fallback)
-│   ├── ev_engine.py              # EV = P×R − Costs; PROCEED / BYPASS / SHADOW
-│   ├── expected_value.py         # Paise-exact EV guardrails
-│   ├── ml_scorer.py              # LightGBM + KS/PSI drift + atomic hot-swap
-│   ├── auth.py                   # JWT HS256 + Principal dataclass + authorize()
-│   ├── database.py               # SQLite WAL + SHA-256 + HMAC audit ledger
-│   ├── db_postgres.py            # Async PostgreSQL (asyncpg, RLS, partitions)
-│   ├── schemas.py                # Pydantic v2 models
-│   ├── security.py               # PII redaction + HMAC + AES-256-GCM
-│   ├── config.py                 # pydantic-settings (v1/v2 compatible)
-│   ├── main.py                   # FastAPI gateway (< 15 ms webhook ACK)
-│   ├── queue_worker.py           # Celery + Redis / asyncio.Queue
+│   ├── agent_graph.py        # Stateful cyclic graph (Epic 1)
+│   ├── bandit.py             # Thompson Sampling bandit (Epic 2)
+│   ├── kafka_worker.py       # Kafka/Redpanda streaming (Epic 3)
+│   ├── agent_engine.py       # Linear pipeline fallback
+│   ├── ev_engine.py          # EV gate + shadow mode
+│   ├── expected_value.py     # Paise-exact EV arithmetic
+│   ├── ml_scorer.py          # LightGBM + drift + hot-swap
+│   ├── auth.py               # JWT + Principal + authorize()
+│   ├── database.py           # SQLite + audit ledger
+│   ├── db_postgres.py        # Async PostgreSQL backend
+│   ├── security.py           # PII + HMAC + AES-256-GCM
+│   ├── main.py               # FastAPI (< 15 ms ACK)
+│   ├── queue_worker.py       # Celery / asyncio.Queue
 │   └── integrations/
-│       ├── razorpay_links.py     # Async Razorpay client + CircuitBreaker
-│       └── whatsapp_notifier.py  # WA / SMS / SMTP + per-channel CB
-│
+│       ├── razorpay_links.py     # Circuit-broken Razorpay client
+│       └── whatsapp_notifier.py  # WA/SMS/Email dispatcher
 ├── tests/
-│   ├── conftest.py               # Cross-module DB + secret isolation
+│   ├── conftest.py               # DB + secret isolation
 │   ├── test_enterprise_controls.py
 │   ├── test_ev_engine.py
 │   ├── test_llm_eval.py
 │   └── test_enterprise_flow.py
-│
-├── terraform/                    # AWS EKS Fargate, Aurora PG, ElastiCache
-├── .github/workflows/deploy.yml  # 8-stage CI/CD (ruff→Bandit→tests→Docker→k8s)
-├── docker-compose.yml            # 4 profiles: dev, chaos, monitoring
-└── monitoring/                   # Prometheus + Grafana config
+├── terraform/                # AWS EKS, Aurora, Redis, Secrets Manager
+├── .github/workflows/        # 8-stage CI/CD pipeline
+├── docker-compose.yml        # dev / chaos / monitoring profiles
+└── monitoring/               # Prometheus + Grafana
 ```
-
----
-
-## 🔐 Security Model
-
-| Control | Implementation |
-|---------|---------------|
-| Webhook authentication | HMAC-SHA256 on every inbound event, constant-time `hmac.compare_digest` |
-| PII redaction | Regex + field-name walk strips email / phone / card before any DB write or LLM call |
-| Audit ledger | SHA-256 hash-chain **+** HMAC-SHA256 per row; `verify_audit_integrity_detailed()` returns exact tampered `log_id`s |
-| Column encryption | AES-256-GCM with HKDF-SHA256 key derivation; graceful `b64only:` fallback |
-| Discount guardrail | LLM discount hard-capped at 15 % in schema validator **and** pipeline outer check |
-| EV gate | Negative-EV actions bypassed; counterfactuals recorded in shadow ledger |
-| HITL gate | Transactions > ₹50k or ML score 0.40–0.60 held for human review |
-| JWT RBAC | HS256 · 3 roles (Admin / Operator / Auditor) · `Principal` · `authorize()` |
-| Tenant isolation | `merchant_id` on all tables; PostgreSQL RLS enforces row-level access |
-
-> **Production notice:** These controls require deployment-specific review, secret management, monitoring, and operational testing before any production use. Never commit credentials or populate production secrets in the demo dashboard.
-
----
-
-## 🛠 Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| **Dashboard** | Streamlit 1.40+, Plotly |
-| **API** | FastAPI, Uvicorn, asyncio — 202 ACK < 15 ms |
-| **Stateful Agent** | `agent_graph.py` — custom cyclic graph (LangGraph-compatible) |
-| **Bandit** | Thompson Sampling β(α,β) · LinUCB · ε-greedy |
-| **Queue** | asyncio.Queue (dev) · Celery + Redis · Kafka / Redpanda (aiokafka) |
-| **ML** | LightGBM, scikit-learn, scipy (KS two-sample + PSI drift) |
-| **Database** | SQLite WAL (dev / Streamlit Cloud) · PostgreSQL Aurora Serverless v2 (prod) |
-| **Security** | HMAC-SHA256, AES-256-GCM, JWT HS256, PII redaction |
-| **EV Engine** | Pure `Decimal` arithmetic, PROCEED / BYPASS / SHADOW modes |
-| **Observability** | Prometheus `/metrics`, OpenTelemetry (9 node spans + token count, latency, prompt version) |
-| **IaC** | Terraform — AWS EKS Fargate, Aurora PG, ElastiCache Redis, Secrets Manager |
-| **CI/CD** | GitHub Actions: ruff → Bandit SAST → 132 tests → Docker → Terraform → kubectl |
 
 ---
 
 <div align="center">
 
+---
+
 Built with ❤️ for the **Razorpay AI Buildathon · Track 03**
 
-[Live Demo](https://recoverai-enterprise.streamlit.app) · [GitHub](https://github.com/SumedhPatil1507/RecoverAI)
+**[Live Demo](https://recoverai-enterprise.streamlit.app)** · **[GitHub](https://github.com/SumedhPatil1507/RecoverAI)**
+
+*Demo runs in staging/shadow mode — no live payments are made.*
 
 </div>
