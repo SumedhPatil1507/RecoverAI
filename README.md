@@ -10,7 +10,7 @@
 
 [![Live Demo](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://recoverai-enterprise.streamlit.app)
 &nbsp;&nbsp;
-[![Tests](https://img.shields.io/badge/✅%20132%20tests%20passing-00c851?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/✅%20112%20tests%20passing-00c851?style=flat-square)](tests/)
 &nbsp;&nbsp;
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://python.org)
 &nbsp;&nbsp;
@@ -21,7 +21,7 @@
 <br/>
 
 > **RecoverAI autonomously recovers failed Razorpay payments using a stateful multi-agent pipeline.**  
-> Thompson Sampling bandit routing · LightGBM ML scoring · EV guardrails · HITL approvals · Cryptographic audit ledger
+> Thompson Sampling bandit routing · LightGBM ML scoring · EV guardrails · **RAG message personalization** · HITL approvals · Cryptographic audit ledger
 
 <br/>
 
@@ -38,8 +38,8 @@
 RecoverAI intercepts every `payment.failed` webhook, scores the transaction with a LightGBM model, routes it through a unit-economic EV gate, and dispatches a personalised recovery link via WhatsApp / SMS / Email — all within milliseconds, with zero manual intervention.
 
 ```
-Payment fails → HMAC webhook → Score → EV Gate → Dispatch → Monitor → Heal → Log
-                    < 15 ms ACK                            async workers
+Payment fails → HMAC webhook → Score → EV Gate → RAG Personalize → Dispatch → Monitor → Heal → Log
+                    < 15 ms ACK                                      async workers
 ```
 
 ---
@@ -165,6 +165,29 @@ Fire **500 concurrent HMAC-signed webhooks** directly from the browser:
 
 ---
 
+### 🧠 Tab 9 — RAG Message Personalization
+
+**Retrieval-Augmented Generation** personalises every outgoing recovery message using a curated library of 42 historically high-performing templates:
+
+- **Vector store** — 42 templates covering 7 failure categories × 2 channels × 3 amount bands, embedded with TF-IDF (no heavy ML deps needed on Streamlit Cloud; optional `sentence-transformers` via `RAG_EMBED_MODEL`)
+- **Top-3 cosine retrieval** — given the failure category and amount band, the agent fetches the 3 closest historical templates before dispatch
+- **Few-shot LLM drafting** — retrieved templates are injected as few-shot context so the LLM generates a message that mirrors proven high-recovery phrasing
+- **Audit provenance** — `rag_dispatch_log` table stores which template IDs influenced each dispatch, with similarity scores and latency; fully queryable for explainability
+- **Interactive Plotly panel** — live demo retrieval, template scatter plot, similarity heatmap, channel treemap, dispatch log with timeline
+
+| Feature | Detail |
+|---|---|
+| Template library | 42 templates · 7 categories · 2 channels · 3 amount bands |
+| Embedding backend | TF-IDF (default) · `sentence-transformers` (optional) |
+| Retrieval metric | Cosine similarity, top-3 |
+| LLM integration | OpenAI GPT-4o-mini few-shot; rule-engine fallback without API key |
+| Audit field | `rag_template_ids`, `rag_top_similarity`, `rag_latency_ms` per dispatch |
+| New pipeline node | `RAG_PERSONALIZE` — inserted between `EV_GATE` and `DISPATCH` |
+
+**Outcome:** Every recovery message is grounded in historically successful phrasing for that exact failure type and payment size — not a generic template.
+
+---
+
 ## 🏗 Architecture
 
 ```
@@ -189,7 +212,13 @@ Fire **500 concurrent HMAC-signed webhooks** directly from the browser:
    │                                         EV_GATE                   │
    │                              EV = P × R − (OpFee + GwCost)         │
    │                              ├─ BYPASS ──▶ shadow_ledger           │
-   │                              └─ PROCEED ──▶ DISPATCH               │
+   │                              └─ PROCEED ──▶ RAG_PERSONALIZE        │
+   │                                                 │                  │
+   │                                retrieve top-3 templates            │
+   │                                few-shot LLM draft                  │
+   │                                log to rag_dispatch_log             │
+   │                                                 │                  │
+   │                                            DISPATCH               │
    │                                                 │                  │
    │                                            MONITOR                 │
    │                                      ├─ ok ──▶ AUDIT_LOG           │
@@ -315,10 +344,12 @@ BANDIT_MODE = "thompson" # thompson | linucb | epsilon_greedy
 | Drift detection | KS two-sample test + PSI on 500-call sliding window |
 | Model hot-swap | `os.replace()` atomic — zero downtime on retrain |
 | EV precision | Pure `Decimal` arithmetic — no floating-point drift |
+| RAG retrieval | 42-template vector store · cosine top-3 · < 5 ms retrieval |
+| RAG personalization | Few-shot LLM draft grounded in high-recovery templates per failure category |
 | Audit integrity | SHA-256 chain + HMAC-SHA256 per row; tampered `log_id` list on breach |
 | Discount guardrail | Hard-capped at 15 % at schema level AND pipeline level |
 | Dispatch resilience | Per-channel circuit breaker + REFLECT fallback (2 cycles) |
-| Test coverage | **132 tests**, 4 isolated files, cross-module secret isolation |
+| Test coverage | **112 tests**, 4 isolated files, cross-module secret isolation |
 | Security | HMAC webhook auth, AES-256-GCM column encryption, JWT RBAC |
 | Infrastructure | Terraform IaC — EKS Fargate, Aurora PG Serverless v2, Redis |
 
@@ -329,7 +360,7 @@ BANDIT_MODE = "thompson" # thompson | linucb | epsilon_greedy
 ```bash
 pip install -r requirements-dev.txt
 pytest tests/ -q --timeout=180
-# → 132 passed, 1 skipped (live DeepEval — requires OPENAI_API_KEY)
+# → 112 passed, 1 skipped (live DeepEval — requires OPENAI_API_KEY)
 ```
 
 | Test file | Count | Covers |
@@ -372,6 +403,7 @@ pytest tests/ -q --timeout=180
 | **API** | FastAPI, Uvicorn, asyncio |
 | **Agent graph** | Custom stateful cyclic graph (LangGraph-compatible) |
 | **Bandit** | Thompson Sampling β(α,β) · LinUCB · ε-greedy |
+| **RAG** | TF-IDF vector store (default) · sentence-transformers (optional) · cosine top-3 |
 | **Queue** | asyncio.Queue · Celery + Redis · Kafka/Redpanda (aiokafka) |
 | **ML** | LightGBM, scikit-learn, scipy (KS + PSI drift) |
 | **Database** | SQLite WAL (dev) · PostgreSQL Aurora Serverless v2 (prod) |
@@ -379,7 +411,7 @@ pytest tests/ -q --timeout=180
 | **EV engine** | Pure `Decimal` arithmetic |
 | **Observability** | Prometheus `/metrics` · OpenTelemetry 9-node spans |
 | **IaC** | Terraform — EKS Fargate · Aurora PG · ElastiCache · Secrets Manager |
-| **CI/CD** | GitHub Actions 8-stage: ruff → Bandit → 132 tests → Docker → Terraform → kubectl |
+| **CI/CD** | GitHub Actions 8-stage: ruff → Bandit → 112 tests → Docker → Terraform → kubectl |
 
 ---
 
@@ -390,7 +422,8 @@ RecoverAI/
 ├── streamlit_app.py          # 8-tab Streamlit demo (no secrets needed)
 ├── requirements.txt
 ├── recover_ai/
-│   ├── agent_graph.py        # Stateful cyclic graph (Epic 1)
+│   ├── agent_graph.py        # Stateful cyclic graph with RAG_PERSONALIZE node
+│   ├── rag_personalizer.py   # 42-template vector store + LLM few-shot drafter (NEW)
 │   ├── bandit.py             # Thompson Sampling bandit (Epic 2)
 │   ├── kafka_worker.py       # Kafka/Redpanda streaming (Epic 3)
 │   ├── agent_engine.py       # Linear pipeline fallback

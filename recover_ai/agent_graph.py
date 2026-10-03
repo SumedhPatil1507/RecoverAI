@@ -107,15 +107,16 @@ _CHANNEL_FALLBACK_ORDER = [
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class NodeName(str, Enum):
-    INGEST      = "INGEST"
-    SCORE       = "SCORE"
-    ROOT_CAUSE  = "ROOT_CAUSE"
-    EV_GATE     = "EV_GATE"
-    DISPATCH    = "DISPATCH"
-    MONITOR     = "MONITOR"
-    REFLECT     = "REFLECT"
-    AUDIT_LOG   = "AUDIT_LOG"
-    TERMINAL    = "TERMINAL"
+    INGEST          = "INGEST"
+    SCORE           = "SCORE"
+    ROOT_CAUSE      = "ROOT_CAUSE"
+    EV_GATE         = "EV_GATE"
+    RAG_PERSONALIZE = "RAG_PERSONALIZE"   # ← NEW: between EV_GATE and DISPATCH
+    DISPATCH        = "DISPATCH"
+    MONITOR         = "MONITOR"
+    REFLECT         = "REFLECT"
+    AUDIT_LOG       = "AUDIT_LOG"
+    TERMINAL        = "TERMINAL"
 
 
 @dataclass
@@ -174,6 +175,13 @@ class GraphState:
     # ── LLM telemetry ─────────────────────────────────────────────────────────
     llm_token_count:  int   = 0
     llm_latency_ms:   float = 0.0
+
+    # ── RAG Personalization ───────────────────────────────────────────────────
+    rag_drafted_message:  str        = ""    # LLM-drafted personalised message
+    rag_retrieved_ids:    list[str]  = field(default_factory=list)   # template IDs used
+    rag_top_similarity:   float      = 0.0
+    rag_latency_ms:       float      = 0.0
+    rag_log_id:           str        = ""    # FK into rag_dispatch_log
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -381,6 +389,92 @@ async def _node_ev_gate(state: GraphState) -> GraphState:
             )
             state.final_status = TransactionStatus.EV_BYPASSED
         state.node_history.append(NodeName.EV_GATE.value)
+    return state
+
+
+async def _node_rag_personalize(state: GraphState) -> GraphState:
+    """
+    Node RAG_PERSONALIZE — retrieve historically successful messages and
+    LLM-draft a personalised outgoing message before DISPATCH.
+
+    Steps:
+      1. Build a query from (failure_category, amount, channel).
+      2. Retrieve top-3 most similar templates from the vector store.
+      3. Use them as few-shot context to LLM-draft a personalised message.
+      4. Persist which template IDs were used to rag_dispatch_log.
+      5. Emit OTel span with similarity scores and latency.
+    """
+    import database as db
+    with _tracer.start_as_current_span("node.rag_personalize") as span:
+        for k, v in _span_attrs(state, NodeName.RAG_PERSONALIZE).items():
+            span.set_attribute(k, v)
+        span.set_attribute("failure_category", state.failure_category.value)
+        span.set_attribute("dispatch_channel", state.dispatch_channel)
+
+        try:
+            from rag_personalizer import personalize_recovery_message
+            result = await personalize_recovery_message(
+                failure_category=state.failure_category.value,
+                amount_rupees=state.amount_paise / 100,
+                channel=state.dispatch_channel,
+                failure_reason=state.failure_reason,
+                payment_id=state.payment_id,
+            )
+
+            state.rag_drafted_message = result.drafted_message
+            state.rag_retrieved_ids   = result.retrieved_ids
+            state.rag_top_similarity  = (
+                result.retrieved_templates[0].similarity
+                if result.retrieved_templates else 0.0
+            )
+            state.rag_latency_ms      = result.latency_ms
+            state.rag_log_id          = str(uuid.uuid4())
+
+            # Persist to rag_dispatch_log for explainability
+            from rag_personalizer import _amount_band
+            db.log_rag_dispatch(
+                rag_log_id=state.rag_log_id,
+                payment_id=state.payment_id,
+                failure_category=state.failure_category.value,
+                amount_band=_amount_band(state.amount_paise / 100),
+                channel=state.dispatch_channel,
+                retrieved_ids=result.retrieved_ids,
+                top_similarity=state.rag_top_similarity,
+                drafted_message=result.drafted_message,
+                llm_used=result.llm_used,
+                latency_ms=result.latency_ms,
+            )
+
+            # Log which templates influenced this dispatch to the audit chain
+            db.append_audit_log(
+                state.payment_id,
+                "RAG_PERSONALIZED",
+                (
+                    f"RAG retrieved templates={result.retrieved_ids} "
+                    f"top_sim={state.rag_top_similarity:.3f} "
+                    f"llm={result.llm_used} "
+                    f"channel={state.dispatch_channel} "
+                    f"latency={result.latency_ms:.1f}ms"
+                ),
+                AuditSource.SYSTEM.value,
+                state.ml_score,
+            )
+
+            span.set_attribute("retrieved_ids",   str(result.retrieved_ids))
+            span.set_attribute("top_similarity",  state.rag_top_similarity)
+            span.set_attribute("llm_used",        result.llm_used)
+            span.set_attribute("rag_latency_ms",  result.latency_ms)
+            logger.info(
+                "RAG_PERSONALIZE: txn=%s retrieved=%s sim=%.3f llm=%s",
+                state.payment_id, result.retrieved_ids,
+                state.rag_top_similarity, result.llm_used,
+            )
+
+        except Exception as exc:
+            logger.warning("RAG_PERSONALIZE failed for %s: %s — continuing with default message", state.payment_id, exc)
+            span.set_attribute("rag_error", str(exc))
+
+        state.node_history.append(NodeName.RAG_PERSONALIZE.value)
     return state
 
 
@@ -701,6 +795,9 @@ async def run_agent_graph(
                 db.increment_attempts(payment_id)
                 state.final_status = TransactionStatus.EV_BYPASSED
                 break
+
+            # ── RAG Personalise message before dispatch ────────────────────
+            state = await _node_rag_personalize(state)
 
             state = await _node_dispatch(state)
             state = await _node_monitor(state)

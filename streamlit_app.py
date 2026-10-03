@@ -1480,7 +1480,8 @@ flowchart TD
     D -->|"amount > ₹50k"| E([PENDING_APPROVAL])
     D -->|pass| F([EV_GATE])
     F -->|"EV ≤ 0"| G([EV_BYPASSED])
-    F -->|"EV > 0"| H([DISPATCH])
+    F -->|"EV > 0"| P([RAG_PERSONALIZE])
+    P -->|"top-3 templates + LLM draft"| H([DISPATCH])
     H --> I([MONITOR])
     I -->|success| J([AUDIT_LOG])
     I -->|"fail (≤ N cycles)"| K([REFLECT])
@@ -1507,4 +1508,341 @@ flowchart TD
             "Set `KAFKA_BOOTSTRAP_SERVERS=broker:9092` in Streamlit Secrets "
             "or `.env` to enable Redpanda/Kafka streaming.",
             icon="⚡",
+        )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RAG PERSONALIZER PANEL  (appended to Tab 8)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab8:
+    st.divider()
+    st.markdown("## 🔍 RAG Message Personalizer")
+    st.caption(
+        "Before every dispatch the agent retrieves the 3 most historically successful "
+        "recovery messages for this failure category + amount band, and uses them as "
+        "few-shot context to LLM-draft a personalised outgoing message. "
+        "Every dispatch logs which template IDs influenced it for full explainability."
+    )
+
+    # ── Live Demo: Interactive Retrieval ─────────────────────────────────────
+    st.markdown("### 🎯 Live RAG Retrieval Demo")
+    st.caption("Configure a hypothetical transaction and see which templates would be retrieved.")
+
+    demo_c1, demo_c2, demo_c3 = st.columns(3)
+    with demo_c1:
+        demo_cat    = st.selectbox("Failure Category", [
+            "GATEWAY_DOWN", "INSUFFICIENT_FUNDS", "USER_CANCELLED",
+            "BANK_DECLINE", "NETWORK_TIMEOUT", "INVALID_DETAILS", "UNKNOWN",
+        ], key="rag_demo_cat")
+        demo_amount = st.number_input("Transaction Amount (₹)", min_value=100, value=2500, step=500, key="rag_demo_amt")
+    with demo_c2:
+        demo_channel = st.selectbox("Dispatch Channel", ["email", "whatsapp", "sms"], key="rag_demo_ch")
+        demo_topk    = st.slider("Top-K Templates", 1, 5, 3, key="rag_demo_k")
+    with demo_c3:
+        demo_reason  = st.text_input("Failure Reason (optional)", placeholder="e.g. bank gateway timeout", key="rag_demo_reason")
+        demo_run     = st.button("🔍 Retrieve Templates", type="primary", use_container_width=True, key="rag_demo_run")
+
+    if demo_run or "rag_demo_result" not in st.session_state:
+        try:
+            sys.path.insert(0, _PKG)
+            from rag_personalizer import (
+                RecoveryMessageVectorStore, personalize_recovery_message,
+                _TEMPLATES, _amount_band,
+            )
+            import asyncio as _asyncio
+
+            store = RecoveryMessageVectorStore.get()
+            retrieved = store.retrieve(
+                query_text=(
+                    f"failed payment recovery {demo_cat.lower().replace('_',' ')} "
+                    f"amount {demo_amount} rupees {demo_channel} {demo_reason}"
+                ),
+                failure_category=demo_cat,
+                amount_rupees=float(demo_amount),
+                channel=demo_channel,
+                top_k=demo_topk,
+            )
+            st.session_state["rag_demo_result"] = retrieved
+            st.session_state["rag_demo_drafted"] = (
+                _asyncio.get_event_loop().run_until_complete(
+                    personalize_recovery_message(
+                        failure_category=demo_cat,
+                        amount_rupees=float(demo_amount),
+                        channel=demo_channel,
+                        failure_reason=demo_reason or None,
+                    )
+                ).drafted_message
+                if retrieved else ""
+            )
+        except Exception as _e:
+            st.session_state["rag_demo_result"] = []
+            st.session_state["rag_demo_drafted"] = f"RAG unavailable: {_e}"
+
+    retrieved_templates = st.session_state.get("rag_demo_result", [])
+    drafted_msg         = st.session_state.get("rag_demo_drafted", "")
+
+    if retrieved_templates:
+        # ── Similarity bar chart (interactive Plotly) ─────────────────────
+        t_ids  = [t.template_id for t in retrieved_templates]
+        t_sims = [t.similarity   for t in retrieved_templates]
+        t_cats = [t.category     for t in retrieved_templates]
+        t_chs  = [t.channel      for t in retrieved_templates]
+        t_rr   = [t.recovery_rate for t in retrieved_templates]
+
+        fig_sim = go.Figure(go.Bar(
+            x=t_ids, y=t_sims,
+            marker_color=[C["green"] if s > 0.6 else C["orange"] if s > 0.4 else C["blue"]
+                          for s in t_sims],
+            text=[f"{s:.3f}" for s in t_sims],
+            textposition="outside",
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Similarity: %{y:.4f}<br>"
+                "Category: " + "<br>".join([f"{i}: {c}" for i, c in enumerate(t_cats)]) +
+                "<extra></extra>"
+            ),
+        ))
+        fig_sim.update_layout(
+            **_PL, height=280, showlegend=False,
+            title="Retrieved Template Cosine Similarities",
+            xaxis=dict(title="Template ID", gridcolor=C["border"]),
+            yaxis=dict(title="Similarity Score", gridcolor=C["border"], range=[0, 1.1]),
+        )
+        st.plotly_chart(fig_sim, use_container_width=True)
+
+        # ── Radar chart: template attributes ─────────────────────────────
+        cats_unique = sorted(set(t_cats))
+        radar_cols  = st.columns(len(retrieved_templates))
+        for col, tmpl in zip(radar_cols, retrieved_templates):
+            col.markdown(
+                f"**{tmpl.template_id}** — {tmpl.category}  \n"
+                f"Channel: `{tmpl.channel}` · Band: `{tmpl.amount_band}`  \n"
+                f"Recovery rate: **{tmpl.recovery_rate:.0%}**  \n"
+                f"Similarity: `{tmpl.similarity:.4f}`"
+            )
+            col.markdown(f"> {tmpl.text[:120]}…" if len(tmpl.text) > 120 else f"> {tmpl.text}")
+
+        # ── Drafted message preview ───────────────────────────────────────
+        st.markdown("#### ✉️ LLM-Drafted Personalised Message")
+        st.info(drafted_msg or "_(no message drafted)_", icon="💬")
+    else:
+        st.warning("No templates retrieved. Try adjusting the failure category or channel.", icon="⚠️")
+
+    st.divider()
+
+    # ── Template Library Explorer ─────────────────────────────────────────────
+    st.markdown("### 📚 Template Library")
+    st.caption("42 curated high-performing templates — 7 failure categories × 2 channels × 3 amount bands.")
+
+    try:
+        sys.path.insert(0, _PKG)
+        from rag_personalizer import _TEMPLATES
+        tmpl_df = pd.DataFrame(_TEMPLATES)
+
+        # ── Interactive filter ────────────────────────────────────────────
+        flt_c1, flt_c2, flt_c3 = st.columns(3)
+        flt_cat  = flt_c1.multiselect("Filter Category",
+                                       sorted(tmpl_df["category"].unique()),
+                                       default=[], key="lib_cat")
+        flt_ch   = flt_c2.multiselect("Filter Channel",
+                                       sorted(tmpl_df["channel"].unique()),
+                                       default=[], key="lib_ch")
+        flt_band = flt_c3.multiselect("Filter Amount Band",
+                                       sorted(tmpl_df["amount_band"].unique()),
+                                       default=[], key="lib_band")
+
+        filtered = tmpl_df.copy()
+        if flt_cat:  filtered = filtered[filtered["category"].isin(flt_cat)]
+        if flt_ch:   filtered = filtered[filtered["channel"].isin(flt_ch)]
+        if flt_band: filtered = filtered[filtered["amount_band"].isin(flt_band)]
+
+        # ── Recovery rate scatter (interactive) ───────────────────────────
+        fig_scatter = go.Figure(go.Scatter(
+            x=filtered["recovery_rate"],
+            y=filtered["id"],
+            mode="markers+text",
+            marker=dict(
+                size=16,
+                color=filtered["recovery_rate"],
+                colorscale="RdYlGn",
+                colorbar=dict(title="Recovery Rate"),
+                showscale=True,
+            ),
+            text=filtered["category"],
+            textposition="middle right",
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Recovery Rate: %{x:.0%}<br>"
+                "Category: %{text}<extra></extra>"
+            ),
+        ))
+        fig_scatter.update_layout(
+            **_PL, height=max(280, len(filtered) * 22),
+            title="Template Recovery Rates",
+            xaxis=dict(title="Historical Recovery Rate", gridcolor=C["border"],
+                       tickformat=".0%", range=[0, 1.05]),
+            yaxis=dict(title="Template ID", gridcolor=C["border"]),
+        )
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+        # ── Category heatmap (recovery rate by category × channel) ────────
+        pivot = filtered.pivot_table(
+            index="category", columns="channel",
+            values="recovery_rate", aggfunc="mean"
+        ).fillna(0)
+
+        if not pivot.empty:
+            fig_hm = go.Figure(go.Heatmap(
+                z=pivot.values,
+                x=pivot.columns.tolist(),
+                y=pivot.index.tolist(),
+                colorscale="RdYlGn",
+                zmin=0, zmax=1,
+                text=[[f"{v:.0%}" for v in row] for row in pivot.values],
+                texttemplate="%{text}",
+                hovertemplate="Category: %{y}<br>Channel: %{x}<br>Avg Rate: %{z:.2%}<extra></extra>",
+            ))
+            fig_hm.update_layout(
+                **_PL, height=340,
+                title="Avg Recovery Rate — Category × Channel",
+                xaxis=dict(title="Channel"),
+                yaxis=dict(title="Failure Category"),
+            )
+            st.plotly_chart(fig_hm, use_container_width=True)
+
+        # ── Filterable table ──────────────────────────────────────────────
+        disp = filtered[["id", "category", "channel", "amount_band",
+                          "outcome", "recovery_rate", "text"]].copy()
+        disp["recovery_rate"] = disp["recovery_rate"].map(lambda x: f"{x:.0%}")
+        st.dataframe(disp, use_container_width=True, height=320, hide_index=True)
+
+    except Exception as _ex:
+        st.info(f"Template library unavailable: {_ex}", icon="📚")
+
+    st.divider()
+
+    # ── RAG Dispatch History ───────────────────────────────────────────────────
+    st.markdown("### 📋 RAG Dispatch Log — Explainability Ledger")
+    st.caption(
+        "Every dispatched message logs which template IDs were retrieved and whether "
+        "the LLM or the template text was used. This provides full explainability."
+    )
+
+    @st.cache_data(ttl=30)
+    def _load_rag_logs():
+        try:
+            rows = _db.get_rag_dispatch_logs(limit=200)
+            return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
+
+    @st.cache_data(ttl=30)
+    def _load_rag_summary():
+        try:
+            return _db.get_rag_summary()
+        except Exception:
+            return {}
+
+    @st.cache_data(ttl=30)
+    def _load_rag_cat_stats():
+        try:
+            return _db.get_rag_category_stats()
+        except Exception:
+            return []
+
+    rag_df   = _load_rag_logs()
+    rag_sum  = _load_rag_summary()
+    rag_cats = _load_rag_cat_stats()
+
+    # ── KPI row ───────────────────────────────────────────────────────────────
+    if rag_sum:
+        r1, r2, r3, r4, r5 = st.columns(5)
+        r1.metric("Total Dispatches",    int(rag_sum.get("total_dispatches") or 0))
+        r2.metric("LLM Drafted",         int(rag_sum.get("llm_drafted") or 0))
+        r3.metric("Template Only",        int(rag_sum.get("template_only") or 0))
+        avg_sim = float(rag_sum.get("avg_similarity") or 0)
+        r4.metric("Avg Similarity",       f"{avg_sim:.3f}")
+        avg_lat = float(rag_sum.get("avg_latency_ms") or 0)
+        r5.metric("Avg Latency",          f"{avg_lat:.1f} ms")
+
+    # ── Category dispatch bar chart ───────────────────────────────────────────
+    if rag_cats:
+        fig_cat = go.Figure(go.Bar(
+            x=[r["failure_category"] for r in rag_cats],
+            y=[r["dispatches"]        for r in rag_cats],
+            marker_color=[C["teal"], C["blue"], C["orange"],
+                          C["green"], C["purple"], C["red"], C["text"]][:len(rag_cats)],
+            text=[r["dispatches"] for r in rag_cats],
+            textposition="outside",
+            hovertemplate="<b>%{x}</b><br>Dispatches: %{y}<extra></extra>",
+        ))
+        fig_cat.update_layout(
+            **_PL, height=260, showlegend=False,
+            title="RAG Dispatches by Failure Category",
+            xaxis=dict(title="Failure Category", gridcolor=C["border"]),
+            yaxis=dict(title="Dispatch Count",   gridcolor=C["border"]),
+        )
+        st.plotly_chart(fig_cat, use_container_width=True)
+
+    if not rag_df.empty:
+        # ── Similarity distribution ───────────────────────────────────────
+        if "top_similarity" in rag_df.columns:
+            fig_hist = go.Figure(go.Histogram(
+                x=rag_df["top_similarity"].dropna(),
+                nbinsx=20,
+                marker_color=C["teal"],
+                hovertemplate="Similarity: %{x:.3f}<br>Count: %{y}<extra></extra>",
+            ))
+            fig_hist.update_layout(
+                **_PL, height=240, showlegend=False,
+                title="Distribution of Top-1 Retrieval Similarities",
+                xaxis=dict(title="Cosine Similarity", gridcolor=C["border"]),
+                yaxis=dict(title="Count",              gridcolor=C["border"]),
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+        # ── Log table ─────────────────────────────────────────────────────
+        disp_cols = [c for c in [
+            "created_at", "payment_id", "failure_category", "channel",
+            "retrieved_ids", "top_similarity", "llm_used", "latency_ms",
+        ] if c in rag_df.columns]
+        adf = rag_df[disp_cols].copy()
+        if "top_similarity" in adf.columns:
+            adf["top_similarity"] = adf["top_similarity"].map(lambda x: f"{x:.4f}")
+        if "llm_used" in adf.columns:
+            adf["llm_used"] = adf["llm_used"].map(lambda x: "✅ LLM" if x else "📄 Template")
+        if "latency_ms" in adf.columns:
+            adf["latency_ms"] = adf["latency_ms"].map(lambda x: f"{x:.1f} ms")
+        st.dataframe(adf, use_container_width=True, height=340, hide_index=True)
+        st.caption(f"{len(rag_df)} RAG dispatch records")
+
+        # ── Template influence treemap (interactive) ──────────────────────
+        import json as _json_mod
+        all_ids: list[str] = []
+        for raw in rag_df.get("retrieved_ids", []):
+            try:
+                all_ids.extend(_json_mod.loads(raw) if isinstance(raw, str) else raw)
+            except Exception:
+                pass
+        if all_ids:
+            from collections import Counter as _Counter
+            id_counts = _Counter(all_ids)
+            fig_tree = go.Figure(go.Treemap(
+                labels=list(id_counts.keys()),
+                parents=["Templates"] * len(id_counts),
+                values=list(id_counts.values()),
+                textinfo="label+value",
+                hovertemplate="<b>%{label}</b><br>Used in %{value} dispatches<extra></extra>",
+                marker=dict(colorscale="Blues"),
+            ))
+            fig_tree.update_layout(
+                **_PL, height=340,
+                title="Template Influence — Which Templates Were Used Most",
+            )
+            st.plotly_chart(fig_tree, use_container_width=True)
+    else:
+        st.info(
+            "No RAG dispatch logs yet.  \n"
+            "Enable `AGENT_GRAPH=1` and process a few transactions to see RAG personalisation in action.  \n"
+            "Or click **🌱 Seed Demo Data** to generate synthetic events.",
+            icon="🔍",
         )

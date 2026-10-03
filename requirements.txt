@@ -63,3 +63,6 @@ asyncpg>=0.29.0
 
 # Optional Kafka/Redpanda streaming (enable with KAFKA_BOOTSTRAP_SERVERS=...)
 aiokafka>=0.11.0
+
+# RAG message personalizer — pure-numpy TF-IDF fallback when not installed
+# sentence-transformers>=3.0.0   # uncomment for semantic embeddings

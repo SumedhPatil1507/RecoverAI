@@ -244,6 +244,24 @@ CREATE TABLE IF NOT EXISTS shadow_ledger (
 CREATE INDEX IF NOT EXISTS idx_shadow_payment ON shadow_ledger(payment_id);
 CREATE INDEX IF NOT EXISTS idx_shadow_created ON shadow_ledger(created_at);
 CREATE INDEX IF NOT EXISTS idx_shadow_mode    ON shadow_ledger(execution_mode);
+
+CREATE TABLE IF NOT EXISTS rag_dispatch_log (
+    rag_log_id         TEXT PRIMARY KEY,
+    payment_id         TEXT NOT NULL,
+    failure_category   TEXT NOT NULL DEFAULT '',
+    amount_band        TEXT NOT NULL DEFAULT '',
+    channel            TEXT NOT NULL DEFAULT '',
+    retrieved_ids      TEXT NOT NULL DEFAULT '',   -- JSON array of template IDs
+    top_similarity     REAL NOT NULL DEFAULT 0.0,
+    drafted_message    TEXT NOT NULL DEFAULT '',
+    llm_used           INTEGER NOT NULL DEFAULT 0,
+    latency_ms         REAL NOT NULL DEFAULT 0.0,
+    created_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_payment  ON rag_dispatch_log(payment_id);
+CREATE INDEX IF NOT EXISTS idx_rag_category ON rag_dispatch_log(failure_category);
+CREATE INDEX IF NOT EXISTS idx_rag_created  ON rag_dispatch_log(created_at);
 """
 
 # Split DDL into individual statements for safe execution
@@ -917,6 +935,100 @@ def get_shadow_summary() -> dict[str, Any]:
             """
         ).fetchone()
     return dict(row) if row else {}
+
+
+# ── RAG Dispatch Log CRUD ─────────────────────────────────────────────────────
+
+def log_rag_dispatch(
+    rag_log_id:        str,
+    payment_id:        str,
+    failure_category:  str,
+    amount_band:       str,
+    channel:           str,
+    retrieved_ids:     list[str],
+    top_similarity:    float,
+    drafted_message:   str,
+    llm_used:          bool,
+    latency_ms:        float,
+) -> None:
+    """
+    Persist one RAG personalisation event.
+
+    Called by agent_graph.RAG_PERSONALIZE node immediately after the
+    message is drafted.  The ``retrieved_ids`` list records which template
+    IDs were used as few-shot context so every dispatch can be explained.
+    """
+    now = _utcnow()
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO rag_dispatch_log
+                (rag_log_id, payment_id, failure_category, amount_band,
+                 channel, retrieved_ids, top_similarity, drafted_message,
+                 llm_used, latency_ms, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rag_log_id, payment_id, failure_category, amount_band,
+                channel,
+                json.dumps(retrieved_ids),
+                top_similarity,
+                drafted_message,
+                1 if llm_used else 0,
+                latency_ms,
+                now,
+            ),
+        )
+
+
+def get_rag_dispatch_logs(limit: int = 200) -> list[sqlite3.Row]:
+    """Return recent RAG dispatch log entries for the dashboard."""
+    with get_db() as conn:
+        return conn.execute(
+            """
+            SELECT r.*, t.failure_category AS txn_category, t.amount_paise
+              FROM rag_dispatch_log r
+              LEFT JOIN transactions t ON r.payment_id = t.payment_id
+             ORDER BY r.created_at DESC
+             LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+
+def get_rag_summary() -> dict[str, Any]:
+    """Aggregate RAG stats for the dashboard panel."""
+    with get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*)                                    AS total_dispatches,
+                SUM(llm_used)                              AS llm_drafted,
+                COUNT(*) - SUM(llm_used)                   AS template_only,
+                AVG(top_similarity)                        AS avg_similarity,
+                AVG(latency_ms)                            AS avg_latency_ms,
+                COUNT(DISTINCT failure_category)           AS unique_categories
+            FROM rag_dispatch_log
+            """
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def get_rag_category_stats() -> list[dict[str, Any]]:
+    """Per-category RAG dispatch counts for bar chart."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT failure_category,
+                   COUNT(*)          AS dispatches,
+                   AVG(top_similarity) AS avg_sim
+              FROM rag_dispatch_log
+             WHERE failure_category != ''
+             GROUP BY failure_category
+             ORDER BY dispatches DESC
+            """
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # Initialize on import so lightweight API/module consumers and Streamlit have a
